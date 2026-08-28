@@ -150,6 +150,11 @@ export default defineConfig(({ command, isPreview }) => ({
     host: "0.0.0.0",
     port: 8080,
     strictPort: true,
+    allowedHosts: true,
+    hmr: {
+      protocol: "wss",
+      clientPort: 443,
+    },
     watch: {
       ignored: ["**/casting/**", "**/.git/**", "**/node_modules/**"],
     },

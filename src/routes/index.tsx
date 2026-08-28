@@ -40,7 +40,7 @@ function Home() {
             <b className="text-fg">R F V T G B</b> Class abilities
           </div>
           <div>
-            <b className="text-fg">LMB</b> fire · <b className="text-fg">RMB</b> orbit
+            <b className="text-fg">LMB</b> fire · <b className="text-fg">RMB</b> focus
           </div>
           <div>
             <b className="text-fg">Tab</b> spell book · editor bind

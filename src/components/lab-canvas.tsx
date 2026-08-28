@@ -1,9 +1,14 @@
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import { Physics, useRapier } from "@react-three/rapier";
 import { useEffect, useRef } from "react";
+import { ACESFilmicToneMapping, SRGBColorSpace } from "three";
 import type { LabEngine } from "@/game/lab-types";
 import type { HudState } from "@/game/lab-types";
 
-type Runtime = LabEngine & { tick: (dt: number) => void };
+type Runtime = LabEngine & {
+  tick: (dt: number) => void;
+  attachRapier: (world: unknown) => void;
+};
 
 function LabBridge({
   onHud,
@@ -13,6 +18,7 @@ function LabBridge({
   onEngine: (e: LabEngine | null) => void;
 }) {
   const { gl, scene, camera } = useThree();
+  const { world } = useRapier();
   const engine = useRef<Runtime | null>(null);
   const onHudRef = useRef(onHud);
   const onEngineRef = useRef(onEngine);
@@ -28,8 +34,9 @@ function LabBridge({
         scene,
         camera,
         ownLoop: false,
-      });
-      engine.current = e as Runtime;
+      }) as Runtime;
+      e.attachRapier(world);
+      engine.current = e;
       onEngineRef.current(e);
     });
     return () => {
@@ -38,7 +45,7 @@ function LabBridge({
       engine.current = null;
       onEngineRef.current(null);
     };
-  }, [gl, scene, camera]);
+  }, [gl, scene, camera, world]);
 
   useFrame((_, delta) => {
     engine.current?.tick(Math.min(delta, 0.1));
@@ -59,14 +66,21 @@ export function LabCanvas({
       className="absolute inset-0 size-full touch-none"
       shadows
       dpr={[1, 1.5]}
-      gl={{ antialias: true, powerPreference: "high-performance" }}
+      gl={{
+        antialias: true,
+        powerPreference: "high-performance",
+        toneMapping: ACESFilmicToneMapping,
+        outputColorSpace: SRGBColorSpace,
+      }}
       camera={{ fov: 55, near: 0.1, far: 1800, position: [6, 4.2, 10] }}
       onCreated={({ gl, scene }) => {
-        gl.setClearColor("#c8dff2");
+        gl.shadowMap.enabled = true;
         scene.background = null;
       }}
     >
-      <LabBridge onHud={onHud} onEngine={onEngine} />
+      <Physics gravity={[0, -9.81, 0]} timeStep={1 / 60} interpolate={false}>
+        <LabBridge onHud={onHud} onEngine={onEngine} />
+      </Physics>
     </Canvas>
   );
 }

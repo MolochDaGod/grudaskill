@@ -47,6 +47,10 @@ export type HudState = {
   tunes: TuneRow[];
   weather: WeatherId;
   activeMode: boolean;
+  hour: number;
+  clock: string;
+  period: string;
+  timeScale: number;
 };
 
 /** Method surface the HUD talks to — kept free of three.js so SSR stays light. */
@@ -79,4 +83,7 @@ export type LabEngine = {
   bindToSlot(code: string): void;
   setWeather(id: WeatherId): void;
   toggleActiveMode(): void;
+  setHour(hour: number): void;
+  toggleCycle(): void;
+  attachRapier(world: unknown): void;
 };

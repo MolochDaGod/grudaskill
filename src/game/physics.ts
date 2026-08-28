@@ -1,6 +1,52 @@
 import RAPIER from "@dimforge/rapier3d-compat";
 import type { FlyingSlash } from "./slash";
 
+/** Rapier layer indices 0–15. Same packing as r3f `interactionGroups`. */
+export const Layer = {
+  GROUND: 0,
+  PLAYER: 1,
+  DUMMY: 2,
+  PROJECTILE: 3,
+  SLASH: 4,
+  AOE: 5,
+} as const;
+
+function bits(layers: number[]) {
+  return layers.reduce((acc, layer) => acc | (1 << layer), 0);
+}
+
+/** membership << 16 | filter — both colliders must pass for a pair to exist. */
+export function groups(membership: number[], filter: number[]) {
+  return (bits(membership) << 16) + bits(filter);
+}
+
+export const GROUPS = {
+  ground: groups([Layer.GROUND], [Layer.PLAYER, Layer.DUMMY]),
+  player: groups([Layer.PLAYER], [Layer.GROUND, Layer.DUMMY]),
+  dummy: groups(
+    [Layer.DUMMY],
+    [Layer.GROUND, Layer.PLAYER, Layer.PROJECTILE, Layer.SLASH, Layer.AOE],
+  ),
+  projectile: groups([Layer.PROJECTILE], [Layer.DUMMY, Layer.AOE]),
+  slash: groups([Layer.SLASH], [Layer.DUMMY]),
+  aoe: groups([Layer.AOE], [Layer.DUMMY]),
+};
+
+/** Solver groups: physical push only. Hit volumes have empty filters (sensors). */
+export const SOLVER = {
+  solid: groups([Layer.GROUND, Layer.PLAYER, Layer.DUMMY], [Layer.GROUND, Layer.PLAYER, Layer.DUMMY]),
+  ghost: groups([Layer.PROJECTILE, Layer.SLASH, Layer.AOE], []),
+};
+
+const HIT_TYPES = RAPIER.ActiveCollisionTypes.ALL;
+
+function collide(desc: RAPIER.ColliderDesc, collision: number, solver: number, hits = false) {
+  desc.setCollisionGroups(collision);
+  desc.setSolverGroups(solver);
+  if (hits) desc.setActiveCollisionTypes(HIT_TYPES);
+  return desc;
+}
+
 export type DummyBody = {
   collider: RAPIER.Collider;
   index: number;
@@ -70,13 +116,13 @@ export class LabPhysics {
         RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, 0.9, 0).setCcdEnabled(true),
       );
       this.playerCol = this.world.createCollider(
-        RAPIER.ColliderDesc.capsule(0.45, 0.42).setTranslation(0, 0, 0),
+        collide(RAPIER.ColliderDesc.capsule(0.45, 0.42).setTranslation(0, 0, 0), GROUPS.player, SOLVER.solid),
         this.playerBody,
       );
     }
-    if (this.ownsWorld && !this.groundCol) {
+    if (!this.groundCol) {
       this.groundCol = this.world.createCollider(
-        RAPIER.ColliderDesc.cuboid(22, 0.5, 22).setTranslation(0, -0.5, 0),
+        collide(RAPIER.ColliderDesc.cuboid(22, 0.5, 22).setTranslation(0, -0.5, 0), GROUPS.ground, SOLVER.solid),
       );
     }
   }
@@ -94,9 +140,12 @@ export class LabPhysics {
       existing.collider.setTranslation({ x, y: 0.9, z });
       return;
     }
-    const desc = RAPIER.ColliderDesc.capsule(0.45, 0.48)
-      .setTranslation(x, 0.9, z)
-      .setSensor(false);
+    const desc = collide(
+      RAPIER.ColliderDesc.capsule(0.45, 0.48).setTranslation(x, 0.9, z).setSensor(false),
+      GROUPS.dummy,
+      SOLVER.solid,
+      true,
+    );
     const col = this.world.createCollider(desc);
     this.dummies.push({ collider: col, index });
   }
@@ -112,7 +161,12 @@ export class LabPhysics {
       return { x: x + dx, z: z + dz };
     }
     this.playerBody.setNextKinematicTranslation({ x, y: 0.9, z });
-    this.controller.computeColliderMovement(this.playerCol, { x: dx, y: 0, z: dz });
+    this.controller.computeColliderMovement(
+      this.playerCol,
+      { x: dx, y: 0, z: dz },
+      RAPIER.QueryFilterFlags.EXCLUDE_SENSORS,
+      GROUPS.player,
+    );
     const mv = this.controller.computedMovement();
     const nx = x + mv.x;
     const nz = z + mv.z;
@@ -124,7 +178,12 @@ export class LabPhysics {
     if (!this.world) return;
     const rb = this.world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setCcdEnabled(true));
     const col = this.world.createCollider(
-      RAPIER.ColliderDesc.cuboid(slash.half.x, slash.half.y, slash.half.z).setSensor(true),
+      collide(
+        RAPIER.ColliderDesc.cuboid(slash.half.x, slash.half.y, slash.half.z).setSensor(true),
+        GROUPS.slash,
+        SOLVER.ghost,
+        true,
+      ),
       rb,
     );
     slash.body = { rb, col };
@@ -167,7 +226,10 @@ export class LabPhysics {
     const rb = this.world.createRigidBody(
       RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(x, y, z).setCcdEnabled(true),
     );
-    const col = this.world.createCollider(RAPIER.ColliderDesc.ball(radius).setSensor(true), rb);
+    const col = this.world.createCollider(
+      collide(RAPIER.ColliderDesc.ball(radius).setSensor(true), GROUPS.projectile, SOLVER.ghost, true),
+      rb,
+    );
     this.shots[index] = { rb, col };
   }
 
@@ -213,4 +275,6 @@ export const R3F_SHAPES = {
   playerCapsule: [0.45, 0.42] as [number, number],
   slashCuboid: (hx: number, hy: number, hz: number) => [hx, hy, hz] as [number, number, number],
   ground: [22, 0.5, 22] as [number, number, number],
+  collision: GROUPS,
+  solver: SOLVER,
 };

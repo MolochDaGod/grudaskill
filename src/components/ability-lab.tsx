@@ -72,6 +72,10 @@ const EMPTY: HudState = {
   tunes: [],
   weather: "sunny",
   activeMode: false,
+  hour: 12,
+  clock: "12:00 PM",
+  period: "Midday",
+  timeScale: 0,
 };
 
 export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
@@ -164,7 +168,7 @@ export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
                 <b className="text-fg">R F V T G B</b> Class abilities
               </div>
               <div>
-                <b className="text-fg">LMB</b> fire · <b className="text-fg">RMB</b> orbit
+                <b className="text-fg">LMB</b> fire · <b className="text-fg">RMB</b> focus
               </div>
               <div>
                 <b className="text-fg">Tab</b> spell book · editor bind
@@ -252,6 +256,31 @@ export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
                 onClick={() => engineRef.current?.toggleActiveMode()}
               >
                 Active
+              </button>
+            </div>
+            <div className="hud-panel pointer-events-auto flex items-center gap-2 rounded-lg px-2.5 py-1.5">
+              <span className="min-w-[4.6rem] text-[11px] tabular-nums text-gold">
+                {hud.clock}
+              </span>
+              <span className="text-[10px] uppercase tracking-wide text-muted">{hud.period}</span>
+              <input
+                type="range"
+                min={0}
+                max={24}
+                step={0.1}
+                value={hud.hour}
+                aria-label="Time of day"
+                className="h-1 w-28 accent-gold"
+                onChange={(e) => engineRef.current?.setHour(Number(e.target.value))}
+              />
+              <button
+                type="button"
+                className={`rounded px-2 py-0.5 text-[10px] ${
+                  hud.timeScale > 0 ? "bg-gold text-bg" : "border border-border"
+                }`}
+                onClick={() => engineRef.current?.toggleCycle()}
+              >
+                {hud.timeScale > 0 ? "Cycle" : "Hold"}
               </button>
             </div>
           </header>

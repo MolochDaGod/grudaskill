@@ -53,6 +53,7 @@ export class CameraFeel {
     speed: number,
     dt: number,
     extraOffset?: THREE.Vector3,
+    lookWeight = 0.12,
   ) {
     const fx = -Math.sin(camYaw);
     const fz = -Math.cos(camYaw);
@@ -66,8 +67,9 @@ export class CameraFeel {
 
     this.velLook.set(fx, 0, fz).multiplyScalar(Math.min(2.4, speed * 0.18));
     this.look.set(player.x, 1.18, player.z);
-    this.look.x += (aim.x - player.x) * 0.12 + this.velLook.x;
-    this.look.z += (aim.z - player.z) * 0.12 + this.velLook.z;
+    this.look.x += (aim.x - player.x) * lookWeight + this.velLook.x;
+    this.look.y += (aim.y - 1.18) * lookWeight * 0.45;
+    this.look.z += (aim.z - player.z) * lookWeight + this.velLook.z;
     camera.lookAt(this.look);
     camera.rotation.z += this.roll;
   }

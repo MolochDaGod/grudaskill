@@ -154,6 +154,8 @@ export class LabEngine {
   private camPitch = 0.38;
   private camDist = 9.5;
   private orbiting = false;
+  private focused = false;
+  private focusOrbit = 0;
   private lastX = 0;
   private lastY = 0;
   private paused = false;
@@ -680,6 +682,18 @@ export class LabEngine {
     this.emit();
   }
 
+  setHour(hour: number) {
+    this.weatherSys.setHour(hour);
+    this.hint = `${this.weatherSys.clock} · ${this.weatherSys.period}`;
+    this.emit();
+  }
+
+  toggleCycle() {
+    this.weatherSys.toggleCycle();
+    this.hint = this.weatherSys.timeScale > 0 ? "Day cycle running" : "Time paused";
+    this.emit();
+  }
+
   resetDummies() {
     this.dummies.forEach((d, i) => {
       const a = (i / this.dummies.length) * Math.PI * 2 + 0.2;
@@ -791,6 +805,7 @@ export class LabEngine {
     if (window.__controlsTest) delete window.__controlsTest;
     if (this.ownLoop) this.renderer.dispose();
     this.grass?.dispose();
+    this.weatherSys?.dispose();
   }
 
   private clearToon() {
@@ -956,6 +971,10 @@ export class LabEngine {
       bendElement: this.bendElement,
       weather: this.weatherSys.id,
       activeMode: this.activeMode,
+      hour: this.weatherSys.hour,
+      clock: this.weatherSys.clock,
+      period: this.weatherSys.period,
+      timeScale: this.weatherSys.timeScale,
       tunes:
         this.snapshotTunes && this.kitMode !== "shot"
           ? this.snapshotTunes(this.kitMode, this.kitMode === "bending" ? this.bendElement : this.element)
@@ -1332,9 +1351,19 @@ export class LabEngine {
   };
   private onPointerDown = (e: PointerEvent) => {
     if (e.button === 2) {
-      this.orbiting = true;
       this.lastX = e.clientX;
       this.lastY = e.clientY;
+      this.updatePointer(e);
+      const target = this.pickFocusTarget();
+      if (target) {
+        this.focused = true;
+        this.lockDummy = target;
+        this.focusOrbit = 0;
+        this.hint = "Focus · A/D strafe · body on target";
+        this.emit();
+      } else {
+        this.orbiting = true;
+      }
       return;
     }
     if (e.button === 0 && !this.editorOpen && !this.studioOpen && !this.bookOpen) {
@@ -1344,11 +1373,24 @@ export class LabEngine {
     }
   };
   private onPointerUp = (e: PointerEvent) => {
-    if (e.button === 2) this.orbiting = false;
+    if (e.button === 2) {
+      this.orbiting = false;
+      this.focused = false;
+      this.focusOrbit = 0;
+    }
   };
   private onPointerMove = (e: PointerEvent) => {
     this.updatePointer(e);
     this.ext?.point(this.pointer);
+    if (this.focused) {
+      const dx = e.clientX - this.lastX;
+      const dy = e.clientY - this.lastY;
+      this.lastX = e.clientX;
+      this.lastY = e.clientY;
+      this.focusOrbit = THREE.MathUtils.clamp(this.focusOrbit - dx * 0.004, -0.7, 0.7);
+      this.camPitch = THREE.MathUtils.clamp(this.camPitch + dy * 0.003, 0.12, 1.05);
+      return;
+    }
     if (this.orbiting) {
       const dx = e.clientX - this.lastX;
       const dy = e.clientY - this.lastY;
@@ -1766,6 +1808,11 @@ export class LabEngine {
   }
 
   private updateAim() {
+    if (this.focused && this.lockDummy) {
+      this.aimPoint.copy(this.lockDummy.group.position);
+      this.aimPoint.y = 1.25;
+      return;
+    }
     this.raycaster.setFromCamera(this.pointer, this.camera);
     const planeHit = this.raycaster.ray.intersectPlane(this.groundPlane, _v);
     if (this.aim === "lock") {
@@ -1807,6 +1854,15 @@ export class LabEngine {
   }
 
   private movePlayer(dt: number) {
+    if (this.focused && this.lockDummy) {
+      const tx = this.lockDummy.group.position.x - this.player.position.x;
+      const tz = this.lockDummy.group.position.z - this.player.position.z;
+      const targetYaw = Math.atan2(tx, tz);
+      const desiredCam = Math.atan2(-tx, -tz) + this.focusOrbit;
+      this.yaw += Math.atan2(Math.sin(targetYaw - this.yaw), Math.cos(targetYaw - this.yaw)) * Math.min(1, dt * 14);
+      this.camYaw += Math.atan2(Math.sin(desiredCam - this.camYaw), Math.cos(desiredCam - this.camYaw)) * Math.min(1, dt * 10);
+      this.player.rotation.y = this.yaw;
+    }
     this.moveFwd.set(-Math.sin(this.camYaw), 0, -Math.cos(this.camYaw));
     this.moveRight.set(Math.cos(this.camYaw), 0, -Math.sin(this.camYaw));
     let ix = 0;
@@ -1830,6 +1886,7 @@ export class LabEngine {
     this.player.position.x = THREE.MathUtils.clamp(next.x, -15.5, 15.5);
     this.player.position.z = THREE.MathUtils.clamp(next.z, -15.5, 15.5);
     this.speed = Math.hypot(vx, vz);
+    if (this.focused) return;
     const aimX = this.aimPoint.x - this.player.position.x;
     const aimZ = this.aimPoint.z - this.player.position.z;
     const faceX = this.speed > 0.6 ? vx : aimX;
@@ -2186,6 +2243,45 @@ export class LabEngine {
     this.physics.releaseShot(shot.slot);
   }
 
+  private pickFocusTarget(): Dummy | null {
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    let best: Dummy | null = null;
+    let bestScore = Infinity;
+    for (const d of this.dummies) {
+      _v.copy(d.group.position).setY(1.2);
+      const along = this.raycaster.ray.direction.dot(_v2.copy(_v).sub(this.raycaster.ray.origin));
+      if (along < 0.5) continue;
+      const rayDist = this.raycaster.ray.distanceToPoint(_v);
+      const dist = this.player.position.distanceTo(_v);
+      if (dist > 18 || rayDist > 1.15) continue;
+      const score = rayDist * 3 + dist * 0.08;
+      if (score < bestScore) {
+        bestScore = score;
+        best = d;
+      }
+    }
+    if (best) return best;
+    this.camera.getWorldDirection(_v);
+    _v.y = 0;
+    if (_v.lengthSq() < 1e-6) return null;
+    _v.normalize();
+    bestScore = Infinity;
+    for (const d of this.dummies) {
+      _v2.copy(d.group.position).sub(this.player.position);
+      _v2.y = 0;
+      const dist = _v2.length();
+      if (dist < 0.6 || dist > 16) continue;
+      const dot = _v.dot(_v2.multiplyScalar(1 / dist));
+      if (dot < 0.12) continue;
+      const score = (1 - dot) * 10 + dist;
+      if (score < bestScore) {
+        bestScore = score;
+        best = d;
+      }
+    }
+    return best;
+  }
+
   private punchCast(skill: SkillDef) {
     const amount =
       skill.kind === "nova" || skill.kind === "ritual" || skill.kind === "portal"
@@ -2231,16 +2327,19 @@ export class LabEngine {
   }
 
   private drawCamera(dt: number) {
+    _v.set(Math.cos(this.camYaw), 0, -Math.sin(this.camYaw)).multiplyScalar(this.focused ? 0.62 : 0.28);
+    if (this.ext?.rig?.shakeOffset) _v.add(this.ext.rig.shakeOffset);
     this.cameraFeel.apply(
       this.camera,
       this.player.position,
       this.camYaw,
       this.camPitch,
-      this.camDist,
+      this.focused ? this.camDist * 0.86 : this.camDist,
       this.aimPoint,
       this.speed,
       dt,
-      this.ext?.rig.shakeOffset,
+      _v,
+      this.focused ? 0.42 : 0.12,
     );
   }
 }

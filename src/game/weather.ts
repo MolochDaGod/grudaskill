@@ -1,7 +1,9 @@
 import * as THREE from "three";
-import { Sky } from "three/examples/jsm/objects/Sky.js";
+import { Sky } from "three/addons/objects/Sky.js";
+import { SkyCycle, formatClock, hourToSun, type DayPeriod } from "./sky-cycle";
 
 export type WeatherId = "sunny" | "dusk" | "overcast" | "rain" | "snow" | "storm";
+export type { DayPeriod };
 
 export const WEATHERS: { id: WeatherId; label: string }[] = [
   { id: "sunny", label: "Sunny" },
@@ -13,8 +15,7 @@ export const WEATHERS: { id: WeatherId; label: string }[] = [
 ];
 
 type Preset = {
-  elevation: number;
-  azimuth: number;
+  hour: number;
   turbidity: number;
   rayleigh: number;
   mieCoefficient: number;
@@ -39,13 +40,12 @@ type Preset = {
 
 const PRESET: Record<WeatherId, Preset> = {
   sunny: {
-    elevation: 48,
-    azimuth: 160,
+    hour: 12,
     turbidity: 2.2,
     rayleigh: 1.05,
     mieCoefficient: 0.004,
     mieDirectionalG: 0.82,
-    cloudCoverage: 0.18,
+    cloudCoverage: 0.22,
     cloudDensity: 0.22,
     cloudSpeed: 0.00008,
     exposure: 1.12,
@@ -56,20 +56,19 @@ const PRESET: Record<WeatherId, Preset> = {
     sun: 1.35,
     fog: 0xc8dff2,
     fogDensity: 0.007,
-    ground: 0x3d5a32,
+    ground: 0x5a4630,
     fall: 0,
     flakes: 0,
     size: 0,
     color: 0xffffff,
   },
   dusk: {
-    elevation: 6,
-    azimuth: 195,
+    hour: 18.7,
     turbidity: 8,
     rayleigh: 2.4,
     mieCoefficient: 0.008,
     mieDirectionalG: 0.9,
-    cloudCoverage: 0.32,
+    cloudCoverage: 0.38,
     cloudDensity: 0.35,
     cloudSpeed: 0.00006,
     exposure: 0.78,
@@ -87,8 +86,7 @@ const PRESET: Record<WeatherId, Preset> = {
     color: 0xffffff,
   },
   overcast: {
-    elevation: 32,
-    azimuth: 150,
+    hour: 13,
     turbidity: 12,
     rayleigh: 0.55,
     mieCoefficient: 0.012,
@@ -111,8 +109,7 @@ const PRESET: Record<WeatherId, Preset> = {
     color: 0xffffff,
   },
   rain: {
-    elevation: 28,
-    azimuth: 145,
+    hour: 11,
     turbidity: 10,
     rayleigh: 0.7,
     mieCoefficient: 0.01,
@@ -135,8 +132,7 @@ const PRESET: Record<WeatherId, Preset> = {
     color: 0xa8c8e8,
   },
   snow: {
-    elevation: 22,
-    azimuth: 140,
+    hour: 10,
     turbidity: 6,
     rayleigh: 1.1,
     mieCoefficient: 0.006,
@@ -159,8 +155,7 @@ const PRESET: Record<WeatherId, Preset> = {
     color: 0xffffff,
   },
   storm: {
-    elevation: 18,
-    azimuth: 130,
+    hour: 16,
     turbidity: 14,
     rayleigh: 0.4,
     mieCoefficient: 0.014,
@@ -185,12 +180,14 @@ const PRESET: Record<WeatherId, Preset> = {
 };
 
 const _sun = new THREE.Vector3();
+const _cloud = new THREE.Color();
 
 export class WeatherSystem {
   id: WeatherId = "sunny";
   readonly sky: Sky;
   readonly hemi: THREE.HemisphereLight;
   readonly sun: THREE.DirectionalLight;
+  readonly cycle: SkyCycle;
   private fog: THREE.FogExp2;
   private renderer: THREE.WebGLRenderer;
   private precip: THREE.Points;
@@ -241,18 +238,32 @@ export class WeatherSystem {
     this.precip.frustumCulled = false;
     this.precip.visible = false;
     scene.add(this.precip);
+    this.cycle = new SkyCycle(scene);
     this.set("sunny");
+  }
+
+  get hour() {
+    return this.cycle.hour;
+  }
+  get timeScale() {
+    return this.cycle.timeScale;
+  }
+  get period() {
+    return this.cycle.period;
+  }
+  get clock() {
+    return formatClock(this.cycle.hour);
   }
 
   bindGround(mat: THREE.MeshStandardMaterial) {
     this.ground = mat;
-    const p = PRESET[this.id];
-    mat.color.setHex(p.ground);
+    mat.color.setHex(PRESET[this.id].ground);
   }
 
   set(id: WeatherId) {
     this.id = id;
     const p = PRESET[id];
+    this.cycle.setHour(p.hour);
     const u = this.sky.material.uniforms;
     u.turbidity.value = p.turbidity;
     u.rayleigh.value = p.rayleigh;
@@ -261,36 +272,53 @@ export class WeatherSystem {
     u.cloudCoverage.value = p.cloudCoverage;
     u.cloudDensity.value = p.cloudDensity;
     u.cloudSpeed.value = p.cloudSpeed;
-    u.showSunDisc.value = id === "overcast" || id === "rain" || id === "storm" ? 0 : 1;
-    this.placeSun(p.elevation, p.azimuth);
-    this.hemi.color.setHex(p.hemiSky);
     this.hemi.groundColor.setHex(p.hemiGround);
-    this.hemi.intensity = p.hemi;
-    this.sun.color.setHex(p.sunColor);
-    this.sun.intensity = p.sun;
-    this.fog.color.setHex(p.fog);
-    this.fog.density = p.fogDensity;
-    this.renderer.setClearColor(p.fog, 1);
-    this.renderer.toneMappingExposure = p.exposure;
     if (this.ground) this.ground.color.setHex(p.ground);
     const mat = this.precip.material as THREE.PointsMaterial;
     mat.color.setHex(p.color);
     mat.size = p.size || 0.08;
     this.precip.visible = p.flakes > 0;
     this.scatter(p.flakes);
+    this.applySun(hourToSun(p.hour), p);
+  }
+
+  setHour(hour: number) {
+    this.cycle.setHour(hour);
+    this.applySun(hourToSun(this.cycle.hour), PRESET[this.id]);
+  }
+
+  setTimeScale(scale: number) {
+    this.cycle.timeScale = Math.max(0, scale);
+  }
+
+  toggleCycle() {
+    this.cycle.timeScale = this.cycle.timeScale > 0 ? 0 : 480;
   }
 
   update(dt: number, origin: THREE.Vector3) {
     this.time += dt;
+    const p = PRESET[this.id];
     const u = this.sky.material.uniforms;
     if (u.time) u.time.value = this.time;
-    const p = PRESET[this.id];
+    _cloud.setHex(
+      this.cycle.period === "Night"
+        ? 0x1a2233
+        : this.cycle.period === "Sunrise"
+          ? 0xffc4a0
+          : this.cycle.period === "Sunset"
+            ? 0xff8a6a
+            : this.id === "storm" || this.id === "rain"
+              ? 0x8899aa
+              : 0xffffff,
+    );
+    const info = this.cycle.update(dt, origin, _sun, p.cloudCoverage, _cloud);
+    this.applySun(info, p);
     if (this.id === "storm") {
       this.flash -= dt;
       if (this.flash <= 0 && Math.random() < dt * 0.35) this.flash = 0.12 + Math.random() * 0.1;
       const bolt = this.flash > 0 ? 1.4 : 0;
-      this.hemi.intensity = p.hemi + bolt;
-      this.renderer.toneMappingExposure = p.exposure + bolt * 0.55;
+      this.hemi.intensity = (info.isDay ? p.hemi : p.hemi * 0.25) + bolt;
+      this.renderer.toneMappingExposure = (info.isDay ? p.exposure : 0.42) + bolt * 0.55;
     }
     if (!this.precip.visible) return;
     const pos = this.precipPos;
@@ -312,6 +340,41 @@ export class WeatherSystem {
     (this.precip.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
   }
 
+  private applySun(info: ReturnType<typeof hourToSun>, p: Preset) {
+    this.placeSun(info.elevation, info.azimuth);
+    const day = Math.max(0, Math.min(1, (info.elevation + 4) / 40));
+    const u = this.sky.material.uniforms;
+    u.showSunDisc.value = info.isDay && this.id !== "overcast" && this.id !== "rain" && this.id !== "storm" ? 1 : 0;
+    if (info.period === "Night") {
+      this.hemi.color.setHex(0x1a2848);
+      this.hemi.intensity = p.hemi * 0.22;
+      this.sun.color.setHex(0xc8d4ee);
+      this.sun.intensity = 0.18;
+      this.fog.color.setHex(0x0c1220);
+      this.fog.density = p.fogDensity * 1.15;
+      this.renderer.setClearColor(0x0c1220, 1);
+      this.renderer.toneMappingExposure = 0.42;
+    } else if (info.period === "Sunrise" || info.period === "Sunset") {
+      this.hemi.color.setHex(0xffb080);
+      this.hemi.intensity = p.hemi * 0.7;
+      this.sun.color.setHex(0xff8a4a);
+      this.sun.intensity = p.sun * 0.7;
+      this.fog.color.setHex(0x6a3a38);
+      this.fog.density = p.fogDensity;
+      this.renderer.setClearColor(0x6a3a38, 1);
+      this.renderer.toneMappingExposure = 0.82;
+    } else {
+      this.hemi.color.setHex(p.hemiSky);
+      this.hemi.intensity = p.hemi * (0.55 + 0.45 * day);
+      this.sun.color.setHex(p.sunColor);
+      this.sun.intensity = p.sun * (0.45 + 0.55 * day);
+      this.fog.color.setHex(p.fog);
+      this.fog.density = p.fogDensity;
+      this.renderer.setClearColor(p.fog, 1);
+      this.renderer.toneMappingExposure = p.exposure;
+    }
+  }
+
   private scatter(count: number) {
     const pos = this.precipPos;
     const n = Math.min(count, pos.length / 3);
@@ -331,5 +394,9 @@ export class WeatherSystem {
     this.sky.material.uniforms.sunPosition.value.copy(_sun);
     this.sun.position.copy(_sun).multiplyScalar(28);
     this.sun.target.position.set(0, 0, 0);
+  }
+
+  dispose() {
+    this.cycle.dispose();
   }
 }
