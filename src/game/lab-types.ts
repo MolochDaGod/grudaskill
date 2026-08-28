@@ -1,0 +1,82 @@
+import type { AimMode, SkillDef } from "./skills";
+import type { WeatherId } from "./weather";
+
+export type { WeatherId };
+export type KitMode = "sandbox" | "bending" | "shot" | "linear" | "samurai";
+
+export type TuneRow = {
+  source: "ext" | "bend" | "lin" | "sam";
+  block: string;
+  key: string;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  value: number;
+};
+
+export type HudState = {
+  paused: boolean;
+  skillName: string;
+  skill: SkillDef;
+  hp: number;
+  mana: number;
+  frozen: number;
+  fps: number;
+  editorOpen: boolean;
+  studioOpen: boolean;
+  custom: SkillDef;
+  hint: string;
+  buffs: string[];
+  aim: AimMode;
+  fleet: string;
+  effects: { id: string; name: string }[];
+  kitId: string;
+  kits: { id: string; name: string }[];
+  bookOpen: boolean;
+  listening: boolean;
+  bindings: Record<string, string>;
+  book: { id: string; name: string; kind: SkillDef["kind"]; school: SkillDef["school"]; book: string; hotkey: string }[];
+  colliders: boolean;
+  armor: string;
+  range: number;
+  element: string;
+  chrome: boolean;
+  kitMode: KitMode;
+  bendElement: string;
+  tunes: TuneRow[];
+  weather: WeatherId;
+  activeMode: boolean;
+};
+
+/** Method surface the HUD talks to — kept free of three.js so SSR stays light. */
+export type LabEngine = {
+  dispose(): void;
+  setCustom(partial: Partial<SkillDef>): void;
+  setTouchMove(x: number, y: number): void;
+  exportSkillJson(): string;
+  selectElement(id: string): void;
+  selectBending(id: string): void;
+  toggleBoost(): void;
+  toggleMagic(): void;
+  toggleFireBuff(): void;
+  setWarlordKit(id: string): Promise<void>;
+  togglePause(): void;
+  toggleEditor(): void;
+  toggleStudio(): void;
+  toggleBook(v?: boolean): void;
+  setArmor(letter: string): void;
+  toggleColliders(): void;
+  resetDummies(): void;
+  setActiveSkill(id: string): void;
+  castCurrent(): void;
+  patchActive(patch: Partial<SkillDef>): void;
+  patchTune(block: string, key: string, source: "ext" | "bend" | "lin" | "sam", value: number): void;
+  castBending(): void;
+  importAsset(file: File): Promise<void>;
+  applyVfx(id: string): void;
+  armBind(): void;
+  bindToSlot(code: string): void;
+  setWeather(id: WeatherId): void;
+  toggleActiveMode(): void;
+};

@@ -1,0 +1,418 @@
+# Grudge Casting Abilities (Three.js)
+
+**Warlords-era lab** for Grudge Studio: Toon RTS hero, DRC combat, catalog weapon skills, elemental path cast + linear skillshots, three-layer terrain, windsurf ride, and production skill/VFX authoring before fleet ship.
+
+**Repo:** [MolochDaGod/CastingAbilitiesThreeJS](https://github.com/MolochDaGod/CastingAbilitiesThreeJS)  
+**Live (control plane):** [casting.grudge.studio](https://casting.grudge.studio) — dev → production lab  
+**Weapon skill DO:** [weapon-skills.grudge-studio.com](https://weapon-skills.grudge-studio.com/api/health)  
+**Live (Vercel):** [casting-abilities-threejs.vercel.app](https://casting-abilities-threejs.vercel.app)  
+**Lab contract:** `/api/v1/casting-lab-contract.json` · SDK `import … from 'casting-abilities/sdk'`  
+**API/DB:** same-origin `/api/*` → Railway `grudge-api` → Postgres · `docs/CASTING_DEPLOY_ENV_SSOT.md`  
+**Skills DO:** `docs/WEAPON_SKILL_DO_SSOT.md`  
+**SSOT index:** `docs/SSOT_INDEX.md` · **SDK export:** `docs/CASTING_SDK_EXPORT_SSOT.md`  
+**Team:** Vercel `grudgenexus` · project `casting-abilities-threejs`
+
+### Hosts
+
+| Host | Role |
+|------|------|
+| `casting.grudge.studio` | **Primary lab** — equip / promote / handoff |
+| `weapon-skills.grudge-studio.com` | CF Worker + Durable Object (CNAME live) |
+| `casting-abilities-threejs.vercel.app` | Project hostname |
+| `casting.grudge-studio.com` | Legacy (optional) |
+
+---
+
+## Stack (fleet package gate)
+
+| Package | Role |
+|---------|------|
+| `three` ^0.185 | **Vanilla** scene graph · GLTF · AnimationMixer · Draco + Meshopt + KTX2 |
+| `@dimforge/rapier3d-compat` ^0.19 | Ground heightfield + human CCT (SI capsule) |
+| `xstate` | Player activity machine |
+| VFX beauty | [vfxgrudge.puter.site](https://vfxgrudge.puter.site/) → `src/vfx/VfxDirector.js` |
+
+**Not R3F** — this lab is vanilla Three + Vite. Forge uses R3F elsewhere.  
+**Engine / deploy / client handoff:** `docs/ENGINE_DEPLOY_SSOT.md`  
+**Dev:** `npm run dev` · **Prod:** `npm run deploy:prod` (build + `vercel --prod`)
+
+**Do not** reintroduce Mixamo FBX as play, Meshy heroes, dual mixers, dual physics, dual cameras, dual Draco loaders, or OrbitControls writing mid-TPS combat.
+
+### Render layers vs terrain L0–L3 (not the same)
+
+| System | Meaning |
+|--------|---------|
+| `LAYER` WORLD/VFX/DISTORTION/CONTACT | Three.js camera bits (`src/core/Layers.js`) |
+| `TERRAIN_LAYER` L0–L3 | Map authoring labels only |
+| Dummy overhead bars | HTML (`OverheadNameplates`) — not a second 3D layer |
+
+### Spell SFX (no death moan on cast)
+
+Default cast = `cast_ramp` · land = `impact_magic` a/b/c.  
+`cast_chant` (blood shaman) only for explicit blood/void skill ids.
+
+### Fishing profession (3D harvest)
+
+**Start:** equip `t0-fishing-pole` (`?t0=t0-fishing-pole`) or **Shift+F** · **RMB** aim · **LMB** cast lure · **S/RMB** snag · **wheel** reel/slack · **LMB/RMB** move Palworld bar zone.
+
+Doc: `docs/FISHING_PROFESSION_SSOT.md` · assets `public/models/fish/` · UI `public/ui/fishing/`
+
+### Gameplay + UX gates (must pass)
+
+After boot: feet on heightfield · one mixer + anim state · Fortnite **shoulder TPS** (5.5–6 m, Orbit off in combat) · weapon skills · loco/physics · HUD.
+
+```js
+window.__gameplayGates  // { ok, summary, gates[] }
+```
+
+Doc: `docs/GAMEPLAY_UX_GATES_SSOT.md` · code `src/core/gameplayGates.js`  
+Camera: combat = TPS shoulder; equip/builder = orbit; focus = tighter 5.5 m.
+
+### VFX Studio (singular skill authoring shell)
+
+**Toggle:** **V** / HUD **VFX** · `src/ui/vfxStudio/VfxStudio.js`  
+**Doc:** `docs/SKILL_AUTHORING_STUDIO_SSOT.md` · map `src/config/skillAuthoringSSOT.js`
+
+Tabs: **Pipeline · Skill · Delivery · VFX · Linear · Samples · Knobs · Export**  
+uMMORPG-shaped (scriptable skill → delivery → effect modules → export).  
+Knobs tab hosts existing lil-gui (`settings.js` live). Samples set meshId + colors.
+
+### Loaders (shared pipeline)
+
+| Decoder | Pin |
+|---------|-----|
+| Draco | `gstatic` versioned **1.5.7** |
+| Meshopt | three `meshopt_decoder` |
+| KTX2 / Basis | `three@0.185.1` basis transcoder · bind after WebGLRenderer |
+
+Code: `src/loaders/gltfPipeline.js` · `AssetLoader` · **one** `sharedGltfLoader()` for weapons / projectiles / equip.  
+Audit: `docs/LOADER_DRACO_KTX2_AUDIT.md` · health: `docs/SYSTEMS_HEALTH_AUDIT.md`
+
+---
+
+## Combat · weapons · VFX (production pattern)
+
+**Product language = weapons** (not free “elements”). Catalog items and staff brands own play.
+
+| Layer | Role |
+|-------|------|
+| Catalog weapons | `t0-weapons` / `master-weapon-prefabs` — equip owns skills + mesh |
+| Catalog skills | `master-weaponSkills` — **never invent skill ids** |
+| Production package | `weaponSkillProduction.js` — anim · VFX · physics · statuses |
+| Statuses | push · freeze · stun · slow · burn · root · knockup (`skillStatusSystem`) |
+| Staff weapons (1–6) | Fire…Arcane brands · path cast pools (`WEAPON_STAFF_IDS`) |
+| **Hold pose residual** | `applyWeaponHoldPose(mixer, gait, kind)` after mixer — see below |
+
+### Weapon hold pose (play equip · same SSOT as Main Panel)
+
+**Canonical source:** ObjectStore `js/grudge6-weapon-hold-pose.js`  
+**Play mirror (keep in sync):** `src/character/weaponHoldPose.js`
+
+After equip (`equipWeaponById` sets `character.weaponHoldKind`), every frame:
+
+```text
+mixer.update(dt)
+→ applyWeaponHoldPose(mixer, this._gait, weaponHoldKind)   // residual on R/L hand
+→ pistol reload overlay (if active — hold residual skipped)
+```
+
+Wired in `CharacterController.update` · kind from `equippedWeaponRuntime`.  
+**Do not** add a second grip/hold module — extend the ObjectStore SSOT and re-copy.
+
+### Weapon mesh collider (cylinder + 0.02 m pad)
+
+**Doc:** `docs/WEAPON_MESH_COLLIDER_SSOT.md` · **Code:** `src/character/weaponMeshCollider.js`
+
+| Step | Action |
+|------|--------|
+| 1 | Resolve weapon **mesh** (`WeaponAttach` child or kit sword/axe/…) |
+| 2 | Sample verts → principal axis (blade/barrel) |
+| 3 | Cylinder radius = max radial + **0.02 m** pad |
+| 4 | Markers: tip / grip / mid under mesh (ride anim) |
+| 5 | `character.rebuildWeaponVolume()` after equip |
+
+Feeds: **tip trail**, **apex residual projectiles**, **IK grip**, **effects**, **SFX**, **parry** (`weaponVolumeBlocks` / `tryParryBlock`).
+
+### Melee weapon tip · trail · apex residual
+
+| Piece | Module |
+|-------|--------|
+| Tip (mesh cylinder / muzzle) | `CharacterController.getWeaponTip` ← `weaponVolume` |
+| Swing ribbon | `src/vfx/weaponTipTrail.js` · samples tip each frame |
+| Apex (combo hit frame) | `settings.residual.hitFrameDelay` → getsuga + fire blur + physics past blade |
+| Beyond-blade hit | `beyondBladeM` + contact from volume.radius |
+| Knobs | Editor → Melee residual · `settings.residual` |
+
+```text
+equip → rebuildWeaponVolume (mesh cylinder + 0.02 m)
+attack start → tipTrail.beginSwing
+  · each frame: sample tip → ribbon (blur if fireTrail)
+  · at apex: residual from tip+beyondBlade · fire path · physics proj (radius from mesh)
+combo step 2/3 / finisher → new beginSwing (apex per hit)
+parry (C) → open _parryUntil · rebuild volume
+incoming player hit (point) → invuln? cancel · tryParryBlock(point)? cancel dmg/status/push
+  · wired: _onProjectileHit + SkillStatusSystem.applyHit
+```
+| Staff normal | Hotbar **1** + **focus LMB** → shared stream orb |
+| Linear skillshots | ice / thunder / meteor / beam / snare / glacier (`elementalLinearCast`) |
+| Path cast | Fire/Water/Earth/Wind Ability pools (draw stroke under staff weapons) |
+| Mesh delivery | orbs · rocks · freeze nova · bubbles · dual arrows · bullets |
+
+```bash
+# Full T0 weapon play-stack checklist (mesh · pack · loco · skills · VFX · deploy)
+node scripts/scaffold-t0-weapon-play.mjs --id t0-sword
+# Per-skill production override
+node scripts/scaffold-weapon-skill.mjs --id staff_fire_bolt --weapon STAFF
+# Split multipacks → SI production meshes
+node scripts/split-gd-orbs-and-charge.mjs
+node scripts/split-element-attack-meshes.mjs
+```
+
+**Agent skill:** `casting-t0-weapon-play` · **Doc:** `docs/T0_WEAPON_PLAY_STACK_SSOT.md`  
+Also: `WEAPON_SKILL_PRODUCTION_SSOT.md` · `T0_WEAPONS_SSOT.md` · `ELEMENTAL_LINEAR_CAST_SSOT.md` · `STAFF_NORMAL_ORBS_CHARGE_SSOT.md`
+
+### Adding a T0 weapon (summary)
+
+1. Catalog row exists (`t0-weapons` + prefab) — do not invent ids  
+2. `weaponType` → anim pack (`weaponAnimPack.js`)  
+3. Equip → mesh · pack · hotbar (`equipWeaponById`)  
+4. Scaffold each skill → fill production override  
+5. Projectiles = SI splits only (`public/models/vfx/…`)  
+6. Dual loadout: Weapon 1/2 paperdoll · combat **Tap Q**  
+7. Smoke `?t0=<id>` · deploy Vercel when code/assets change
+
+### Controls (combat)
+
+| Input | Action |
+|-------|--------|
+| **Tap Q** | Dual weapon loadout swap (Weapon 1 ↔ Weapon 2 · mesh · anim pack · skills) |
+| **Hold Q** | Mode radial (combat ↔ harvest) |
+| **1–4** | Weapon skills (catalog hotbar) |
+| **RMB** | Focus aim (TPS) |
+| **Focus + LMB** | Staff/wand → **slot 1 normal** (orb stream) |
+| **F** | Weapon primary skill |
+| **Hold LMB + drag** | Path cast stroke (non-focus / freeride) |
+| **Alt+Shift+Q/E/R/F/V/G** | Arm linear skillshot (MOBA aim) |
+
+Dodge stays **AA / DD / X** — **Q never dodges**.
+
+---
+
+## Assets (SSOT)
+
+### Character (runtime CDN — not bundled)
+
+| Resource | URL |
+| --- | --- |
+| **Play kit ★** | `https://assets.grudge-studio.com/asset-packs/toon-rts-characters/glb/characters/{human\|barbarian\|elf\|orc\|undead\|dwarf}.glb` |
+| Race atlas (optional) | `https://assets.grudge-studio.com/textures/grudge6/…/*.webp` |
+| Gear presets | `https://assets.grudge-studio.com/api/v1/grudge6-gear-presets.json` |
+| Idle clip | `https://open.grudge-studio.com/anims/baked/magic/standing%20idle.json` |
+| Cast clip | `https://open.grudge-studio.com/anims/baked/magic/standing%201h%20cast%20spell%2001.json` |
+| Walk clip | `https://open.grudge-studio.com/anims/baked/magic/Standing%20Walk%20Forward.json` |
+
+Code: `src/config/grudge6SSOT.js` + `src/config/assets.js`  
+Deploy path: `deployToonPlayKit` (`src/character/toonKitPlay.js`) — bone SI fit, **yaw 0**, mesh_ids equip.
+
+**Not play defaults** (author/lab only): `models/grudge6/races/*_Characters.glb` / `.fbx`
+
+### Windsurf ride (shipped with site)
+
+| Resource | Path |
+| --- | --- |
+| Package GLB | `public/models/ride/windsurf_package.glb` (~11.7 MB) |
+| Hoverboard fallback | `public/models/ride/hoverboard.glb` |
+| IK sockets | `public/models/ride/ride.manifest.json` |
+| IK reference | `public/models/ride/ik-reference.png` |
+
+Live: `https://casting-abilities-threejs.vercel.app/models/ride/…`  
+Code: `HoverboardRide.js` + `RideIK.js` (feet → deck, hands → boom/`sailRail`)
+
+### VFX meshes (shipped splits — SI)
+
+| Pack | Path | Use |
+|------|------|-----|
+| Element orbs | `public/models/vfx/orbs/orb-*.glb` | Staff normal projectiles (gd_orbs split) |
+| Charge shell | `public/models/vfx/charge/staff-charge.glb` | Cast charge (kamehameha bake) |
+| Earth rocks | `public/models/vfx/rocks/rock-0..7.glb` | Nature/earth pull → linear/aimed |
+| Arrows | `public/models/vfx/arrows/arrow-path.glb` · `arrow-loft.glb` | Linear path vs lofted throw/trap |
+| Summons | `public/models/vfx/summons/` | Fire fist / ice shard (legacy heavy) |
+| Skill overrides | `public/skills/production/<id>.json` | Optional per-skill production tweaks |
+
+**Never** load multipack sources whole as projectiles (`*_src.glb` = author only).
+
+### Local only
+
+| Resource | Path |
+| --- | --- |
+| HDRI | `public/hdri/spruit_sunrise.hdr` |
+
+### HUD · Bars pack (shipped)
+
+Product picks from `D:\Games\Models\bars-hud-pack` → `public/hud/bars/`.  
+SSOT: `src/ui/barsHudUi.js` · styles `bars-hud.css` · world plates `OverheadNameplates.js`.
+
+| Role | File |
+|------|------|
+| **Player unit frame** | `unit-frames/unit_frame_009.png` |
+| **Enemy overhead HP** | `overhead/overhead_health_003.png` |
+| **Ally overhead HP** | `overhead/overhead_health_001.png` |
+| **Bar fillers** | `fillers/health_fill_*` · `mana_fill_*` · `stamina_fill_*` |
+
+- Player TL frame = `009` chrome + fillers for HP/MP/STA (CraftPix portrait layers under).  
+- Training dummies / hostiles = world overhead **003** (fill tracks `userData.hp01`).  
+- Ally strip = **001** chrome when party members exist.  
+- CraftPix hotbar / cast bar stay under `public/ui/craftpix/` (complement, not replaced).
+
+### Paperdoll · dual weapons (Main Panel **I**)
+
+No belt / amulet / ring / cloak. Slots:
+
+| Column | Slots |
+|--------|--------|
+| Left | Head · Body · Arms · Legs · Shoulders · **Relic** |
+| Right | **Weapon 1** · **Off 1** · **Weapon 2** · **Off 2** · **Back** · Mount |
+
+Combat **Tap Q** swaps set A ↔ B (`equippedWeaponRuntime.swapWeaponLoadout`).  
+Code: `src/ui/mainPanelSlots.js` · `src/combat/equippedWeaponRuntime.js`.
+
+---
+
+## Terrain (three layers)
+
+| Layer | Role | Code |
+|-------|------|------|
+| **L0** | Height field (one sample) | `IslandHeightfield` · Rapier heightfield |
+| **L1** | Surface ground colors | heightfield mesh |
+| **L2** | Grass + growing forest | `StylizedGrassLayer` · `GrowingForest` |
+| **L3** | Harvest rocks | `DevIslandHarvest` |
+| Water | Ocean sibling | `StageWater` |
+
+Patterns: snakey-locomotion · three-stylized · forestoutline · Rapier terrain.  
+Docs: `THREE_LAYER_TERRAIN_SSOT.md` · `TERRAIN_PHYSICS_SSOT.md`
+
+Aim / path / feet all use **one** `terrain.sample` via `projectToTerrain`.
+
+---
+
+## Controls
+
+| Input | Action |
+| --- | --- |
+| **Hold LMB + drag** | Draw path (equip / freeride cast) |
+| **Release** | Cast element — or **windsurf path course** in walk mode |
+| **RMB** | Focus aim (combat) · orbit in equip |
+| **Focus + LMB** | Staff normal (slot 1) |
+| **M** | Cast ↔ **walk** (windsurf vehicle mode) |
+| **Space** (walk, not riding) | Deploy windsurf **vehicle** (frontflip + board) |
+| **E** (mounted) | **Get off** — unparent, remove board, land controller |
+| **WASD** | Land move (DRC) · freeride boat thrust/turn when mounted |
+| **1–4** | Weapon skills (combat) / elements (equip) |
+| **Tap Q** | Combat: swap Weapon 1 ↔ 2 (skills + loco) · Harvest: return combat |
+| **Hold Q** | Mode radial (combat ↔ harvest) |
+| **I** | Inventory / paperdoll (dual weapons · relic · back) |
+| **F** | Weapon primary skill |
+| **G** | VFX editor |
+| **C** | Clear effects / hard cancel ride |
+| **P** | Pause |
+| **H** | Help |
+| **Alt+V/B/F/G/T/C** | Sandbox VFX previews |
+| **Alt+Shift+Q/E/R/F/V/G** | Linear skillshot arm |
+
+---
+
+## Character + ride stack
+
+- **Loader:** shared glTF pipeline (Draco + Meshopt + KTX2 after renderer bind)  
+- **Clone:** SkeletonUtils / deployToonPlayKit  
+- **Equip:** mesh_ids visibility (`EquipmentManager`) + catalog hand mesh  
+- **Anims:** Bip001 magic + sword_shield packs (Open baked JSON) · **one mixer**  
+- **Combat:** `DrcCombatController` + Rapier CCT + TPS camera + production skills  
+- **Ride vehicle:** walk mode → deploy → **parent under deckCenter** → **RideIK** until **E** get-off → board removed  
+
+```
+[ ] Height ~1.55–2.05 m (bone SI fit)
+[ ] Feet grounded (structural min.y / bone feet), not pelvis-as-feet
+[ ] Toon play GLB only (asset-packs/toon-rts-characters/…)
+[ ] One AnimationMixer; RideIK only while `_rideActive` / mounted
+[ ] windsurf_package.glb 200 on prod + manifest sockets
+[ ] Dismount: vehicle gone + character.restoreFromRide land loco
+[ ] No bare GLTFLoader (use sharedGltfLoader)
+```
+
+---
+
+## Quick start
+
+```bash
+npm install
+npm run dev
+```
+
+```bash
+npm run build
+npm run preview
+```
+
+First boot needs network for race kits + baked clips.
+
+---
+
+## Deploy (Vercel)
+
+```bash
+npm run build
+vercel --prod
+```
+
+Linked project: **casting-abilities-threejs** (`grudgenexus`).  
+`vercel.json`: Vite · `dist` · COOP header.
+
+| What ships in `dist` | What loads at runtime |
+| --- | --- |
+| App JS/CSS, HDRI, **ride GLBs**, `hud/bars/*`, CraftPix UI | Toon RTS kits, atlases, anim JSON (CDN / Open) |
+
+---
+
+## Project layout
+
+```
+src/
+  abilities/      Element path-cast Ability pools
+  animation/      CharacterController, WalkController (one mixer)
+  character/      toonKitPlay, RideIK, EquipmentManager, WeaponMeshAttach
+  combat/         DRC, skill production, statuses, delivery, linear plan
+  loaders/        gltfPipeline (Draco/Meshopt/KTX2), AssetLoader
+  config/         settings, assets, grudge6SSOT, worldScale
+  effects/        HoverboardRide, trails, bursts
+  physics/        Rapier world + heightfield
+  skillshot/      Linear skillshots (ice/thunder/meteor/…)
+  ui/             HUD (bars pack + CraftPix), OverheadNameplates, inventory, AdminHub
+  vfx/            VfxDirector, staffOrbVfx, elementAttackVfx
+  world/          IslandHeightfield, grass, forest, StageWater, harvest
+public/
+  models/ride/    windsurf_package.glb + manifest
+  models/vfx/     orbs, charge, rocks, arrows, summons
+  skills/production/  optional skill override JSON
+  hdri/
+docs/             CASTING_LAB · WEAPON_SKILL_PRODUCTION · THREE_LAYER_TERRAIN · LOADER audit …
+scripts/          split orbs/rocks · scaffold-weapon-skill
+```
+
+### Key docs
+
+| Doc | Topic |
+|-----|--------|
+| `CASTING_LAB_SSOT.md` | Lab macro map |
+| `WEAPON_SKILL_PRODUCTION_SSOT.md` | Scriptable production skills |
+| `ELEMENTAL_LINEAR_CAST_SSOT.md` | Element × linear merge |
+| `THREE_LAYER_TERRAIN_SSOT.md` | L0–L2 terrain |
+| `LOADER_DRACO_KTX2_AUDIT.md` | Decoder pins · no conflicts |
+| `SYSTEMS_HEALTH_AUDIT.md` | Conflict / forget checklist |
+| `FLEET_ENTRY_DEPLOY_LOADERS_RAYCAST_REVIEW.md` | Entry · deploy · raycast review |
+| `ENTRY_CATCH` (gameopen) | Player start URLs · anti-loop |
+
+### Player entry (fleet)
+
+Use Open `PRODUCT_STARTS` / `startUrlForIntent` — not guessed hosts.  
+Library: `open.grudge-studio.com` · create hero: `character.grudge-studio.com/foundry` · cabinets: `grudox.grudge-studio.com/arcade`.

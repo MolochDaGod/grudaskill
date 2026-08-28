@@ -1,0 +1,38 @@
+{
+  "url": "http://127.0.0.1:8081/",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "Grudge Ability Lab",
+      "hasCanvas": true,
+      "bodyTextLen": 321,
+      "bodyTextHash": "f92bfd732e2c53509f84cac0508908e83d81632d78fc91e66b05495fc01b8495",
+      "bodyTextPrefix": "GRUDGE STUDIO Ability Lab Warlord from the D1 CDN, VFX catalog f",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-built.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "Grudge Ability Lab",
+      "hasCanvas": true,
+      "bodyTextLen": 321,
+      "bodyTextHash": "f92bfd732e2c53509f84cac0508908e83d81632d78fc91e66b05495fc01b8495",
+      "bodyTextPrefix": "GRUDGE STUDIO Ability Lab Warlord from the D1 CDN, VFX catalog f",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-built-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/app-builder-built.json",
+  "divergesFromBaseline": false,
+  "baselineReasons": []
+}

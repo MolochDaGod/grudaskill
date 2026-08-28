@@ -1,0 +1,2753 @@
+import {
+  AnimationMixer,
+  Box3,
+  Color,
+  EdgesGeometry,
+  Euler,
+  Group,
+  LineBasicMaterial,
+  LineSegments,
+  LoopOnce,
+  LoopRepeat,
+  MathUtils,
+  Matrix4,
+  Quaternion,
+  Vector3
+} from 'three';
+import { settings } from '../config/settings.js';
+// Box3 used by getWeaponTip mesh-tip measure
+import { applyWeaponHoldPose, normalizeHoldKind } from '../character/weaponHoldPose.js';
+import { WeaponSheathRuntime } from '../character/WeaponSheathRuntime.js';
+import {
+  buildWeaponMeshVolume,
+  getVolumeAxisWorld,
+  getVolumeTipWorld,
+  WEAPON_COLLIDER_PAD_M
+} from '../character/weaponMeshCollider.js';
+import {
+  ANIM_PACKS,
+  DODGE_ROLE,
+  ROLL_ROLE,
+  DEFAULT_RACE,
+  FALLBACK_PRESETS,
+  GEAR_PRESETS_URL,
+  bakedClipUrlsForRole
+} from '../config/assets.js';
+import { animPackForLoadout, activeWeaponSlot, packCombatBlurb, WEAPON_SLOT_TO_PACK } from '../config/weaponAnimPack.js';
+import { describeAnimLibrary, roleBlurb } from '../config/animLibrary.js';
+import { pistolTimeScale, FLINTLOCK_FIRE } from '../config/pistolAnimSsot.js';
+import { playTpsPistolClip, updateTpsPistolProp } from './tpsPistolProp.js';
+import { rifleGaitRoles } from '../config/rifleAnimSsot.js';
+import { PistolReloadPose, findWeaponAttach, getMuzzleWorld, getBarrelForward } from './pistolReloadPose.js';
+import {
+  getWeaponAttachFromHand,
+  getSpineWorldFromAttach,
+  stampWeaponSpine
+} from '../character/WeaponMeshAttach.js';
+import {
+  familyFromAttachProfile,
+  familyFromWeaponType,
+  primaryCombatPointId,
+  spinePointForVfxAnchor
+} from '../character/weaponPrefabSpine.js';
+import {
+  atlasUrlForRace,
+  kitUrlForRace,
+  loadoutToMeshIds,
+  logSSOT,
+  isToonRtsKitUrl,
+  raceDef,
+  defaultRoleForRace,
+  defaultPackForRace,
+  GRUDGE6_SSOT_VERSION
+} from '../config/grudge6SSOT.js';
+import { EquipmentManager } from '../character/EquipmentManager.js';
+import {
+  deployToonPlayKit,
+  reGroundToonKit,
+  applyMeshIdsExclusive,
+  diagnoseCharacterLook,
+  countSkeletons
+} from '../character/toonKitPlay.js';
+import { RideIK } from '../character/RideIK.js';
+import {
+  createFootGrounder,
+  placeRootFeetAt,
+  samplerFromHeightAt
+} from '../character/grudge6-foot-ik.js';
+import { BackSlotEquip } from '../character/BackSlotEquip.js';
+import { LAYER } from '../core/Layers.js';
+import { disposeObject } from '../utils/dispose.js';
+import { loadBakedClipJson, rematchClipToSkeleton } from './bakeClip.js';
+import {
+  loadFbxClipRematched,
+  FLIP_FBX_URLS,
+  FALL_FBX_URLS,
+  MELEE_FBX_URLS
+} from './fbxClip.js';
+import {
+  FALL_ROLES,
+  FALL_THRESHOLDS,
+  pickLandRole,
+  shouldEnterFall
+} from '../config/fallAnimSsot.js';
+import { AnimRigDebug, diagnoseBreaking } from './animRigDebug.js';
+
+const _castOrigin = new Vector3();
+const _rideFwd = new Vector3();
+const _rideLeft = new Vector3();
+/** Local +X on tilt — backflip spin axis (pitch) */
+const _flipAxis = new Vector3(1, 0, 0);
+
+/**
+ * Toon RTS / grudge6 combat hero — ObjectStore loadRaceKit parity ONLY.
+ *
+ * RIGHT SOURCE: info.grudge-studio.com/js/grudge6-kit.js + race-scenes
+ *   Toon GLB → clone → mesh_ids → bone SI fit → yaw 0 → one mixer
+ *
+ * Purged (wrong paths that keep breaking Warlords heroes):
+ *  - unifySkeletons + pose() on partial head skins → head at feet
+ *  - setFromObject skinned mesh SI fit → explode / under-scale
+ *  - facePlusZ π/2 on Toon play GLB
+ *  - races bake / metaverse / FBX play fallback
+ *  - SittingPose Mixamo / soft HandIK every frame
+ *
+ * RideIK only while WalkController ride is active.
+ */
+export class CharacterController {
+  constructor(environment) {
+    this.environment = environment;
+    this.root = new Group();
+    this.root.name = 'Character';
+
+    this.tilt = new Group();
+    this.tilt.name = 'CharacterTilt';
+    this.root.add(this.tilt);
+
+    this.mixer = null;
+    this.actions = new Map();
+    this.current = null;
+    this.height = 1.8;
+    this.headPosition = new Vector3(0, 1.5, 0);
+    this.forwardAxis = new Vector3(0, 0, 1);
+
+    this.equipment = null;
+    /** @type {{ rHand?: object, lHand?: object, pelvis?: object }|null} */
+    this.bones = null;
+    this.raceId = DEFAULT_RACE;
+    this.animPackId = defaultPackForRace(DEFAULT_RACE);
+    this.presetId = defaultRoleForRace(DEFAULT_RACE);
+    this.presets = FALLBACK_PRESETS.slice();
+
+    /** 'idle' | 'walk' | 'run' | 'cast_loop' | 'attack' */
+    this.animState = 'idle';
+    this._attackTimer = 0;
+    this._oneShotTimer = 0;
+    this._castingExternal = false;
+    this._boundPacks = new Set();
+    this._gait = 0;
+    this._gaitKey = '0:fwd';
+    this._strafe = null;
+    this._gaitLocked = false;
+    /** Overlay take-hit (weight on gait — not exclusive one-shot) */
+    this._overlayAct = null;
+    this._overlayTimer = 0;
+    this._overlayRole = null;
+    /** @type {AnimRigDebug|null} */
+    this.rigDebug = null;
+    /** Hold jump clip until land (first jump) */
+    this._airJumpHold = false;
+    /** Melee combo index 0..2 after last light hit; -1 = idle */
+    this._meleeComboStep = -1;
+    this._airComboStep = -1;
+    this._airComboUntil = 0;
+    /** Sim-clock deadline to continue combo (not wall-clock — hitch-proof) */
+    this._meleeComboUntil = 0;
+    this._simTime = 0;
+
+    this.sitting = null;
+    /** @type {import('../character/RideIK.js').RideIK|null} */
+    this.rideIk = null;
+    /** @type {import('../character/BackSlotEquip.js').BackSlotEquip|null} */
+    this.backSlot = null;
+    /**
+     * Hand ↔ hip/back sheath for traversal + mount.
+     * Hold-pose residual only while drawn.
+     * @type {WeaponSheathRuntime}
+     */
+    this.weaponSheath = new WeaponSheathRuntime({
+      getModel: () => this.model,
+      getBones: () => this.bones || this.equipment?.findBones?.() || {},
+      getAttach: () => this.weaponAttach,
+      setAttach: (a) => {
+        this.weaponAttach = a;
+      }
+    });
+    this._rideActive = false;
+    /** Last sprint flag from setGait (for sheath policy) */
+    this._sprinting = false;
+    /** World heading for ride pole vectors (set by WalkController) */
+    this._rideYaw = 0;
+    /**
+     * When true, root is parented under windsurf seat — do not write world XZ/Y
+     * to root.position (board vehicle owns transform until dismount).
+     */
+    this._rideParented = false;
+    /** Cached world feet for position getter while parented */
+    this._worldPos = new Vector3();
+    this.ik = null;
+    /** Post-mixer two-bone plant — same height field as Rapier CCT. */
+    this.footGrounder = createFootGrounder({ Vector3, Quaternion, Matrix4 });
+    this._heightAt = null;
+    this._footGrounded = true;
+
+    /** Procedural flip on tilt (backflip / frontflip deploy) */
+    this._flipActive = false;
+    this._flipTime = 0;
+    /** −1 = backflip, +1 = frontflip (pitch about local right) */
+    this._flipSign = -1;
+    this._flipDuration = 0.55;
+    /** True when playing a real clip (no tilt spin) */
+    this._flipUseClip = false;
+    /** Look yaw to hold on camera during backflip setup */
+    this._flipCameraHoldYaw = null;
+  }
+
+  /**
+   * @param {import('../loaders/AssetLoader.js').AssetLoader} assets
+   * @param {{ raceId?: string, presetId?: string }} [opts]
+   */
+  async load(assets, opts = {}) {
+    this.assets = assets;
+    this.raceId = opts.raceId || DEFAULT_RACE;
+    this.presetId = opts.presetId || defaultRoleForRace(this.raceId);
+    logSSOT();
+
+    await this._loadPresets();
+
+    const race = raceDef(this.raceId);
+    // PLAY: Toon RTS GLB only — no races-bake / metaverse / FBX fallback
+    const kitUrl = kitUrlForRace(this.raceId);
+
+    let gltf = null;
+    try {
+      gltf = await assets.loadGLTF(kitUrl);
+    } catch (err) {
+      console.error('[CharacterController] Toon RTS kit failed (no fallback)', kitUrl, err);
+      throw err;
+    }
+    if (!gltf) throw new Error(`No Toon RTS race GLB: ${kitUrl}`);
+    if (!isToonRtsKitUrl(kitUrl)) {
+      throw new Error(`[CharacterController] refuse non-Toon play kit: ${kitUrl}`);
+    }
+
+    // Toon embeds only — never forceAtlas (yellow/grey sludge).
+    await assets.settled();
+    this.atlas = null;
+
+    // Clear previous kit
+    while (this.tilt.children.length) {
+      const c = this.tilt.children[0];
+      this.tilt.remove(c);
+      disposeObject(c);
+    }
+
+    // Preset → body mesh_ids only. Kit staff/sword/bow stay hidden — catalog T0 is play weapon.
+    const preset = this.presets.find((p) => p.id === this.presetId) || this.presets[0];
+    this.animPackId = defaultPackForRace(this.raceId) || this._packFromPreset(preset);
+    const cleanLoadout = { ...(preset?.loadout || { body: 'A', arms: 'A', legs: 'A', head: 'A' }) };
+    delete cleanLoadout.bag;
+    delete cleanLoadout.wood;
+    delete cleanLoadout.quiver;
+    delete cleanLoadout.carry;
+    delete cleanLoadout.showUtility;
+    delete cleanLoadout.staff;
+    delete cleanLoadout.sword;
+    delete cleanLoadout.bow;
+    delete cleanLoadout.axe;
+    delete cleanLoadout.hammer;
+    delete cleanLoadout.spear;
+    delete cleanLoadout.shield;
+    delete cleanLoadout.pistol;
+    const meshIds = loadoutToMeshIds(race.prefix, cleanLoadout);
+
+    // ★ ObjectStore loadRaceKit parity — no unify/pose, bone SI fit, yaw 0
+    const deployed = deployToonPlayKit(gltf.scene, { meshIds });
+    const kit = deployed.root;
+    kit.name = `${race.short}_toon`;
+    kit.userData.importUrl = kitUrl;
+    kit.userData.playMesh = 'toon-rts';
+    kit.userData.ssotVersion = GRUDGE6_SSOT_VERSION;
+    const report = deployed.equip;
+
+    // Always re-apply exclusive loadout. preserveVisibility alone left multipack
+    // kits fully visible when mesh_id fuzzy match missed (all weapons/armor on).
+    this.equipment = new EquipmentManager(kit, { preserveVisibility: true });
+    this.equipment.carryMode = false;
+    const equipReport = this.equipment.applyLoadout(cleanLoadout);
+    // Second pass by mesh_ids catches author naming that classifyMesh misses
+    if ((equipReport?.matched || 0) < 3) {
+      const byIds = this.equipment.applyMeshIds(meshIds);
+      console.info(
+        `[CharacterController] equip fallback mesh_ids matched=${byIds.matched} missing=${byIds.missing?.length || 0}`,
+      );
+    } else {
+      console.info(
+        `[CharacterController] equip loadout matched=${equipReport.matched} missing=${(equipReport.missing || []).join(',')}`,
+      );
+    }
+    this.equipment.hideUtility();
+    this.equipment.hideKitWeapons();
+    // Fail-closed: never leave hero fully invisible after exclusive equip
+    {
+      let vis = 0;
+      kit.traverse((o) => {
+        if ((o.isMesh || o.isSkinnedMesh) && o.visible) vis += 1;
+      });
+      if (vis < 1) {
+        console.warn('[CharacterController] equip left 0 meshes visible — default A armor rescue');
+        applyMeshIdsExclusive(kit, []);
+        this.equipment.hideUtility();
+        this.equipment.hideKitWeapons();
+      }
+    }
+
+    kit.traverse((o) => {
+      if (!o.isMesh && !o.isSkinnedMesh) return;
+      o.layers.set(LAYER.WORLD);
+      o.layers.enable(LAYER.CONTACT);
+      o.castShadow = true;
+      o.receiveShadow = true;
+      if (o.isSkinnedMesh) o.frustumCulled = false;
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      for (const m of mats) if (m) this.environment?.registerShadowCaster?.(m);
+    });
+
+    // root (world feet + yaw) → tilt → model
+    this.tilt.add(kit);
+    this.model = kit;
+    this._bodyHidden = false;
+    this.root.position.set(0, 0, 0);
+    this.root.rotation.set(0, 0, 0);
+    this.tilt.position.set(0, 0, 0);
+    this.tilt.quaternion.identity();
+
+    this.height = deployed.height || kit.userData.deployHeightM || 1.8;
+    this.headPosition.set(0, this.height * 0.86, 0);
+    this.bones = this.equipment.findBones();
+
+    // Single AnimationMixer — Bip001 packs, position tracks stripped, bones-only rematch
+    this.mixer = new AnimationMixer(kit);
+    this.actions.clear();
+    this._boundPacks.clear();
+
+    // One mixer · equipped pack only. Other weapon packs bind on setAnimPack.
+    await this._bindPack(this.animPackId);
+
+    if (this.actions.has('idle')) this.play('idle', 0);
+    else if (this.actions.size) this.play([...this.actions.keys()][0], 0);
+
+    this.mixer.update(1 / 30);
+    // Re-ground after idle sample + exclusive equip (visibility changes bbox)
+    reGroundToonKit(kit, 0);
+    this.footGrounder.bind(this.root);
+    this._plantFeetAtTerrain(this._sampleHeight(this.root.position.x, this.root.position.z));
+    this.height = kit.userData.deployHeightM || this.height;
+    // Face camera +Z (Toon play) — never leave sideways bind
+    kit.rotation.set(0, 0, 0);
+
+    // Shared overlays only — not every weapon pack at once (was fighting gait).
+    void Promise.all([this._bindPack('combat_mobility'), this._bindPack('reactions')])
+      .then(() => {
+        console.info('[CharacterController] mobility + reactions ready');
+      })
+      .catch((err) => {
+        console.warn('[CharacterController] overlay packs', err);
+      });
+
+    if (this.rideIk) this.rideIk.rebind(kit);
+    else this.rideIk = new RideIK(kit);
+    this._rideActive = false;
+    this.weaponSheath?.rebind?.();
+
+    // Back-slot utility (windsurf stow on spine) — same equip family as hands
+    const backId = settings.walk?.backSlot || 'windsurf';
+    if (this.backSlot) this.backSlot.rebind(kit);
+    else this.backSlot = new BackSlotEquip(kit);
+    if (backId && backId !== 'none') {
+      this.backSlot.equip(backId).catch((err) => console.warn('[Character] back slot', err));
+    }
+
+    this._bindRigDebug();
+
+    const look = this.diagnoseLook();
+    const vis = this._countVisibleSkinned();
+    const uprightOk = deployed.upright !== false;
+    console.info(
+      `[CharacterController] toon-rts★ ${this.raceId}/${this.presetId} ` +
+        `kit=${kitUrl.split('/').pop()} path=objectstore-parity ` +
+        `h=${this.height.toFixed(2)}m equip=${report.matched} vis=${vis} clips=${this.actions.size} ` +
+        `upright=${deployed.upright} headY=${deployed.headY?.toFixed(2)} footY=${deployed.footY?.toFixed(2)} ` +
+        (uprightOk && vis >= 3 ? 'OK' : `WARN ${JSON.stringify(look.errors || [])}`),
+    );
+
+    return this;
+  }
+
+  /** Visible skinned pieces (body/arms/legs/head should be ≥3–4). */
+  _countVisibleSkinned() {
+    let n = 0;
+    this.model?.traverse((o) => {
+      if (o.isSkinnedMesh && o.visible) n++;
+    });
+    return n;
+  }
+
+  /** World AABB of visible body (for camera / debug). */
+  getWorldBodyBox(out = new Box3()) {
+    if (!this.model) return out.makeEmpty();
+    this.root.updateMatrixWorld(true);
+    out.makeEmpty();
+    let any = false;
+    this.model.traverse((o) => {
+      if (!o.isSkinnedMesh || !o.visible) return;
+      if (/weapon|shield|staff|sword|bow|axe|hammer/i.test(o.name || '')) return;
+      try {
+        const b = new Box3().setFromObject(o, true);
+        if (b.isEmpty()) return;
+        if (!any) {
+          out.copy(b);
+          any = true;
+        } else out.union(b);
+      } catch {
+        /* */
+      }
+    });
+    return out;
+  }
+
+  /**
+   * Snap root so bone-feet sit on terrainY (Vector3 + Matrix4).
+   * Never assign root.y = terrain — that is pelvis-as-feet (cut in half).
+   */
+  placeAt(x, y, z) {
+    if (this._rideParented || this._rideActive) return;
+    this.root.position.x = x;
+    this.root.position.z = z;
+    this._plantFeetAtTerrain(y);
+  }
+
+  /**
+   * Same L0 sample as Rapier CCT / grass / aim. Required for IK + kinematic land.
+   * @param {(x:number,z:number)=>number|null} fn
+   */
+  setTerrainHeightAt(fn) {
+    this._heightAt = typeof fn === 'function' ? fn : null;
+    this.footGrounder.setGroundSampler(
+      this._heightAt ? samplerFromHeightAt(this._heightAt) : null
+    );
+  }
+
+  setHeightSample(fn) {
+    this.setTerrainHeightAt(fn);
+  }
+
+  setFootGrounded(on) {
+    this._footGrounded = !!on;
+    this.footGrounder.setEnabled(!!on && !this._rideActive && !this._rideParented);
+  }
+
+  _sampleHeight(x, z) {
+    const y = this._heightAt?.(x, z);
+    return Number.isFinite(y) ? y : 0;
+  }
+
+  _plantFeetAtTerrain(terrainY) {
+    const y = Number.isFinite(terrainY) ? terrainY : this._sampleHeight(this.root.position.x, this.root.position.z);
+    placeRootFeetAt(this.root, y, { Vector3, Matrix4, Box3, Quaternion });
+    this._hipAboveFeet = this.root.position.y - y;
+  }
+
+  /** Hide body for smoke-blink / vanish (model only — mixer stays). */
+  setBodyHidden(hidden) {
+    this._bodyHidden = !!hidden;
+    if (this.model) this.model.visible = !this._bodyHidden;
+  }
+
+  /**
+   * Ranger stealth: others see nothing (hiddenFromSight).
+   * Local player keeps a light-green silhouette border only.
+   */
+  setStealthLook(on) {
+    this._stealthOn = !!on;
+    this.userData = this.userData || {};
+    this.userData.hiddenFromSight = !!on;
+    if (this.model?.userData) this.model.userData.hiddenFromSight = !!on;
+    if (this.root?.userData) this.root.userData.hiddenFromSight = !!on;
+    if (!this.model) return;
+    if (on) this._applyStealthLook();
+    else this._clearStealthLook();
+  }
+
+  _applyStealthLook() {
+    this._clearStealthLook();
+    const st = settings.presentation?.stealth || {};
+    const fill = st.fillOpacity ?? 0.07;
+    const edgeHex = st.outlineColor || '#8ed89a';
+    const edgeCol = new Color(edgeHex);
+    this._stealthEdges = [];
+    this.model.traverse((o) => {
+      if (!o.isMesh || !o.geometry) return;
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      o.userData._preStealthMats = mats.map((m) => m);
+      const ghosts = mats.map((m) => {
+        if (!m) return m;
+        const g = m.clone();
+        g.transparent = true;
+        g.opacity = fill;
+        g.depthWrite = false;
+        if (g.color) g.color.lerp(new Color(0xb8efc4), 0.4);
+        if (g.emissive) {
+          g.emissive.copy(edgeCol);
+          g.emissiveIntensity = Math.min(0.22, (g.emissiveIntensity || 0) + 0.12);
+        }
+        return g;
+      });
+      o.material = ghosts.length === 1 ? ghosts[0] : ghosts;
+      try {
+        const edges = new LineSegments(
+          new EdgesGeometry(o.geometry, 28),
+          new LineBasicMaterial({
+            color: edgeCol,
+            transparent: true,
+            opacity: 0.88,
+            depthWrite: false,
+            toneMapped: false
+          })
+        );
+        edges.name = 'StealthOutline';
+        edges.userData.stealthOutline = true;
+        o.add(edges);
+        this._stealthEdges.push(edges);
+      } catch {
+        /* optional */
+      }
+    });
+  }
+
+  _clearStealthLook() {
+    if (this.model) {
+      this.model.traverse((o) => {
+        if (o.userData?._preStealthMats) {
+          const prev = o.userData._preStealthMats;
+          o.material = prev.length === 1 ? prev[0] : prev;
+          delete o.userData._preStealthMats;
+        }
+        const drop = (o.children || []).filter((c) => c.userData?.stealthOutline);
+        for (const c of drop) {
+          o.remove(c);
+          c.geometry?.dispose?.();
+          c.material?.dispose?.();
+        }
+      });
+    }
+    this._stealthEdges = [];
+  }
+
+  diagnoseLook() {
+    if (!this.model) return { ok: false, reason: 'no-model' };
+    const d = diagnoseCharacterLook(this.model, 0);
+    const bones = this.equipment?.findBones?.() || this.bones || {};
+    // Don't throw — boot must complete even if bone helpers missing
+    let skelCount = 0;
+    try {
+      skelCount = countSkeletons(this.model);
+    } catch {
+      skelCount = -1;
+    }
+    const heightOk = (d.height ?? 0) >= 1.55 && (d.height ?? 0) <= 2.15;
+    const feetOk = Math.abs((d.feetMinY ?? 99) - 0) < 0.12;
+    const mixamoTracks = this._countMixamoTracks();
+    const mixerOk = !!this.mixer && this.mixer.getRoot?.() === this.model;
+    const handOk = !!bones.rHand;
+    const errors = [...(d.errors || [])];
+    if (mixamoTracks > 0) errors.push(`${mixamoTracks} mixamorig tracks still on mixer`);
+    if (!mixerOk) errors.push('kit mixer missing or not on Toon root');
+    if (!handOk) errors.push('R_hand_container / Bip001 R Hand missing');
+    if (skelCount > 1) errors.push(`unifySkeletons needed (${skelCount} skeletons)`);
+    return {
+      ok:
+        heightOk &&
+        feetOk &&
+        mixerOk &&
+        handOk &&
+        mixamoTracks === 0 &&
+        !!(bones.pelvis || d.bip001?.count >= 18) &&
+        errors.length === 0,
+      heightM: +(d.height ?? 0).toFixed(3),
+      feetMinY: +(d.feetMinY ?? 0).toFixed(3),
+      heightOk,
+      feetOk,
+      pelvis: !!bones.pelvis,
+      rHand: handOk,
+      mixamoTracks,
+      mixerOk,
+      errors,
+      equipMatched: this.equipment?.loadout || {},
+      skeletons: skelCount,
+      bip001: d.bip001?.count ?? 0,
+      clips: this.actions?.size || 0
+    };
+  }
+
+  /** Leftover Mixamo tracks on the kit mixer = remesh leak. */
+  _countMixamoTracks() {
+    let n = 0;
+    if (!this.actions) return 0;
+    for (const act of this.actions.values()) {
+      const tracks = act?.getClip?.()?.tracks || [];
+      for (const t of tracks) {
+        if (/mixamorig/i.test(t.name || '')) n++;
+      }
+    }
+    return n;
+  }
+
+  async _loadPresets() {
+    try {
+      const res = await fetch(GEAR_PRESETS_URL, { mode: 'cors' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      const list = json.presets || json;
+      if (Array.isArray(list) && list.length) this.presets = list;
+    } catch (err) {
+      console.warn('[CharacterController] presets CDN fail; using fallbacks', err);
+      this.presets = FALLBACK_PRESETS.slice();
+    }
+  }
+
+  _packFromPreset(preset) {
+    const pack = preset?.pack || 'sword_shield';
+    if (pack === 'magic' || pack.startsWith('magic')) return 'magic';
+    if (pack.includes('sword') || pack.includes('shield') || pack === '2h_melee') return 'sword_shield';
+    if (pack.includes('rifle')) return 'rifle';
+    if (pack.includes('pistol') || pack.includes('handgun') || pack === 'gun') return 'pistol';
+    if (pack.includes('bow') || pack === 'longbow') return 'longbow';
+    return ANIM_PACKS[pack] ? pack : 'sword_shield';
+  }
+
+  /**
+   * Swap Toon RTS race kit (all 6 races) — full reload, same preset when possible.
+   * @param {string} raceId WK|ELF|BRB|ORC|UD|DWF
+   */
+  async setRace(raceId) {
+    if (!this.assets) throw new Error('CharacterController.setRace: call load() first');
+    const next = raceId || DEFAULT_RACE;
+    if (next === this.raceId && this.model) return this;
+    await this.load(this.assets, { raceId: next, presetId: this.presetId });
+    return this;
+  }
+
+  /**
+   * Bind / activate a weapon locomotion + skill anim pack.
+   * @param {string} packId magic | sword_shield | longbow | locomotion_8way
+   */
+  async setAnimPack(packId) {
+    const id = ANIM_PACKS[packId]
+      ? packId
+      : WEAPON_SLOT_TO_PACK[packId] || this.animPackId || 'sword_shield';
+    this.animPackId = id;
+    // Re-bind so primary role names (idle/walk/attack) match this pack
+    this._boundPacks.delete(id);
+    const pack = ANIM_PACKS[id];
+    if (pack) {
+      for (const role of Object.keys(pack)) {
+        const prev = this.actions.get(role);
+        if (prev) {
+          try {
+            prev.stop();
+          } catch {
+            /* ignore */
+          }
+          this.actions.delete(role);
+        }
+      }
+    }
+    await this._bindPack(id);
+    if (this.actions.has('idle')) this.play('idle', 0.25);
+    else if (this.actions.has(`${id}:idle`)) this.play(`${id}:idle`, 0.25);
+    return id;
+  }
+
+  /** Bound clip roles for anim library UI. */
+  listAnimRoles() {
+    return [...this.actions.keys()].sort();
+  }
+
+  /**
+   * Animation library snapshot (packs, families, mobility, play API).
+   * Use for Showcase Anims tab + agent diagnostics — do not fork role names.
+   * @see config/animLibrary.js · docs/ANIM_LIBRARY_SSOT.md
+   */
+  getAnimLibrary() {
+    return describeAnimLibrary(this);
+  }
+
+  /** Math snapshot: laterality, blend weights, feet vs terrain. */
+  getRigReport() {
+    return diagnoseBreaking(this, this.root?.position?.y ?? 0);
+  }
+
+  /** Human blurb for a bound role (toast / lab). */
+  describeRole(roleName) {
+    return roleBlurb(roleName);
+  }
+
+  /** Unarmed kick / hurricane / uppercut — library roles only. */
+  playUnarmedKick() {
+    return (
+      this.playLibraryClip('kick') ||
+      this.playLibraryClip('hurricane') ||
+      this.playLibraryClip('uppercut') ||
+      this.requestOneShot('kick')
+    );
+  }
+
+  /** Play a library clip by role name (one-shot for attack/block/jump). */
+  playLibraryClip(role) {
+    if (!role) return false;
+    const base = String(role).split(':').pop();
+    if (/^(hitReact|knockedUp|stun|blownAway|getup)$/i.test(base)) {
+      return this.playReaction(base);
+    }
+    if (/^(airDash|mantle|grapple|ride|slideGetup|leap)/i.test(base)) {
+      if (/airDash/i.test(base)) {
+        const dir = /L$/.test(base) ? 'left' : /R$/.test(base) ? 'right' : /B$/.test(base) ? 'back' : 'forward';
+        const r = this.playAirDash(dir);
+        return !!(r && r.ok !== false);
+      }
+      if (/mantle/i.test(base)) return this.playMantle();
+      if (/getup|slideGetup/i.test(base)) return this.playGetup();
+      if (/grapple/i.test(base)) {
+        const phase = /Loop/.test(base) ? 'loop' : /Detach/.test(base) ? 'detach' : /Reel/.test(base) ? 'reel' : 'grab';
+        return this.playGrapple(phase);
+      }
+      if (/ride/i.test(base)) return this.playRide(/Run/i.test(base));
+    }
+    if (!this.actions.has(role)) return false;
+    const once =
+      /attack|block|parry|jump|cast|dodge|roll|slide|gunplay|spin|draw|reload|skill\d|mantle|airDash|hitReact|stun|blown/i.test(
+        role
+      );
+    // Combat flourishes need weapon in hand before clip starts
+    if (/attack|gunplay|spin|cast|draw|reload|block|parry|skill\d/i.test(role)) {
+      this.weaponSheath?.unsheath?.('combat-clip');
+    }
+    this.play(role, once ? 0.12 : 0.25);
+    if (once) {
+      const act = this.actions.get(role);
+      // T0 pistol: fire / draw / reload timing from pistolAnimSsot
+      if (this.animPackId === 'pistol' && act) {
+        if (/reload/i.test(role)) act.timeScale = pistolTimeScale('reload');
+        else if (/draw|cast|block/i.test(role)) act.timeScale = pistolTimeScale('draw');
+        else if (/attack|gunplay|spin/i.test(role)) act.timeScale = pistolTimeScale('fire');
+        else if (/charged|skill2/i.test(role)) act.timeScale = pistolTimeScale('charged');
+        else if (/whip|skill3/i.test(role)) act.timeScale = pistolTimeScale('whip');
+        const tpsRole = /draw|cast|block|reload/i.test(role)
+          ? 'draw'
+          : /attack|gunplay|spin/i.test(role)
+            ? 'fireaim'
+            : null;
+        if (tpsRole) playTpsPistolClip(this.weaponAttach, tpsRole);
+      } else if (act && act.timeScale !== 1) {
+        act.timeScale = 1;
+      }
+      const dur = (act?.getClip?.()?.duration ?? 0.6) / (act?.timeScale || 1);
+      this._oneShotTimer = Math.max(this._oneShotTimer, dur * 0.95);
+      this._gaitLocked = true;
+      this.animState = /attack|gunplay|spin/i.test(role)
+        ? 'attack'
+        : /reload/i.test(role)
+          ? 'reload'
+          : /roll/i.test(role)
+            ? 'roll'
+            : /slide/i.test(role)
+              ? 'slide'
+              : /dodge/i.test(role)
+                ? 'dodge'
+                : this.animState;
+    }
+    return true;
+  }
+
+  /**
+   * Procedural flintlock powder reload: gun to body middle · L-hand to barrel · tilt up.
+   * @param {{ power?: boolean, durationSec?: number }} [opts]
+   */
+  playPistolReload(opts = {}) {
+    if (!this._pistolReload) this._pistolReload = new PistolReloadPose();
+    return this._pistolReload.start(this, opts);
+  }
+
+  /**
+   * Charged Shot wind-up — blend into charged-pistol / skill2, slow timeScale.
+   * @param {string} [role]
+   */
+  beginWeaponChargeAnim(role = 'skill2') {
+    const name =
+      (this.actions.has(role) && role) ||
+      (this.actions.has('skill2') && 'skill2') ||
+      (this.actions.has('cast') && 'cast') ||
+      (this.actions.has('attack') && 'attack');
+    if (!name) return false;
+    this._weaponChargeAnim = name;
+    this._gaitLocked = true;
+    this.animState = 'charge';
+    // Longer blend into charge pose (production weapon UX)
+    const blend = settings.character?.chargeBlend ?? 0.22;
+    this.play(name, blend);
+    const act = this.actions.get(name);
+    if (act) {
+      try {
+        act.setLoop(LoopOnce, 1);
+        act.clampWhenFinished = true;
+        // Slow wind — charged-pistol ~2.5s feels like draw power
+        act.timeScale =
+          this.animPackId === 'pistol'
+            ? Math.min(0.75, pistolTimeScale('charged') * 0.55)
+            : 0.65;
+        act.time = 0;
+      } catch {
+        /* */
+      }
+    }
+    this._oneShotTimer = 99; // hold until endWeaponChargeAnim
+    return true;
+  }
+
+  /**
+   * Advance charge pose (scrub into clip by progress).
+   * @param {number} progress01
+   * @param {number} holdSec
+   */
+  tickWeaponChargeAnim(progress01, holdSec = 0) {
+    const name = this._weaponChargeAnim;
+    if (!name) return;
+    const act = this.actions.get(name);
+    if (!act) return;
+    const clip = act.getClip?.();
+    const dur = clip?.duration ?? 1;
+    // Scrub first ~55% of charged clip while holding (windup rest pose)
+    const t = Math.min(0.55, Math.max(0, progress01) * 0.55) * dur;
+    try {
+      act.time = t;
+      act.paused = progress01 > 0.92; // hold full pose near max charge
+      if (!act.paused && !act.isRunning()) act.play();
+    } catch {
+      /* */
+    }
+    this._oneShotTimer = 99;
+  }
+
+  /**
+   * End charge windup — fire snap or cancel restore gait blend.
+   * @param {boolean} [fireCharged]
+   */
+  endWeaponChargeAnim(fireCharged = false) {
+    const name = this._weaponChargeAnim;
+    this._weaponChargeAnim = null;
+    const act = name ? this.actions.get(name) : null;
+    if (act) {
+      try {
+        act.paused = false;
+        if (fireCharged) {
+          // Snap remaining clip at fire scale
+          act.timeScale =
+            this.animPackId === 'pistol' ? pistolTimeScale('charged') : 1.1;
+          act.time = Math.max(act.time, (act.getClip?.()?.duration ?? 1) * 0.45);
+          act.setLoop(LoopOnce, 1);
+          act.clampWhenFinished = true;
+          if (!act.isRunning()) act.play();
+          this._oneShotTimer = Math.max(
+            0.35,
+            ((act.getClip?.()?.duration ?? 0.6) - act.time) / Math.max(0.1, act.timeScale)
+          );
+          this.animState = 'attack';
+          return true;
+        }
+        // Cancel — fade out charge, restore gait
+        act.fadeOut(settings.character?.gaitBlend ?? 0.28);
+      } catch {
+        /* */
+      }
+    }
+    this._oneShotTimer = 0.08;
+    this._gaitLocked = false;
+    this.animState = 'idle';
+    const g = this._gait;
+    this._gait = -1;
+    this.setGait?.(g, g >= 2);
+    return true;
+  }
+
+  /** Refresh weaponAttach pointer from R_hand (after equip). */
+  syncWeaponAttach() {
+    const hand = this.bones?.rHand;
+    this.weaponAttach =
+      getWeaponAttachFromHand(hand) || findWeaponAttach(this) || this.weaponAttach || null;
+    // Fresh equip → always drawn (combat ready); re-evaluate next frame
+    this.weaponSheath?.rebind?.();
+    this.weaponSheath?.unsheath?.('equip');
+    return this.weaponAttach;
+  }
+
+  /** True when weapon is on hand socket (not hip/back stow). */
+  get isWeaponDrawn() {
+    return this.weaponSheath ? this.weaponSheath.isDrawn : true;
+  }
+
+  /**
+   * Manual sheath lock (UI). null = follow traversal/mount policy.
+   * @param {boolean|null} sheath
+   */
+  setWeaponSheathed(sheath) {
+    this.weaponSheath?.setManual?.(sheath, 'ui');
+  }
+
+  /**
+   * Directional dodge one-shot — longbow standing dodge L/R/F/B preferred.
+   * @param {'left'|'right'|'forward'|'back'} dir
+   * @returns {boolean}
+   */
+  playDodge(dir) {
+    const role = DODGE_ROLE[dir] || 'dodgeB';
+    const candidates = [role, `longbow:${role}`, `combat_mobility:${role}`];
+    for (const name of candidates) {
+      if (this.actions.has(name)) {
+        this.play(name, 0.08, { exclusive: true });
+        const act = this.actions.get(name);
+        const dur = act?.getClip?.()?.duration ?? settings.drc?.dodgeDuration ?? 0.42;
+        this._oneShotTimer = Math.max(this._oneShotTimer, dur * 0.92);
+        this._gaitLocked = true;
+        this.animState = 'dodge';
+        return true;
+      }
+    }
+    // Fallback: jump clip as mobility tell
+    if (this.actions.has('jump')) {
+      this.play('jump', 0.08, { exclusive: true });
+      this._oneShotTimer = 0.35;
+      this._gaitLocked = true;
+      this.animState = 'dodge';
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Directional roll one-shot — Ghost Rider roll_* preferred (Ctrl+A/D).
+   * Exclusive mixer weight so retargeted rolls do not dual-bind deform.
+   * @param {'left'|'right'|'forward'|'back'} dir
+   * @returns {{ ok: boolean, duration: number, role: string|null }}
+   */
+  playRoll(dir) {
+    const role = ROLL_ROLE[dir] || 'rollB';
+    const candidates = [role, `combat_mobility:${role}`, DODGE_ROLE[dir], `longbow:${DODGE_ROLE[dir]}`];
+    for (const name of candidates) {
+      if (!name || !this.actions.has(name)) continue;
+      // Exclusive: fade every other action (idle/walk residual = rubber limbs)
+      this.play(name, 0.06, { exclusive: true });
+      const act = this.actions.get(name);
+      const clipDur = act?.getClip?.()?.duration ?? settings.drc?.rollDuration ?? 0.55;
+      // Prefer full clip; impulse syncs to this in DRC
+      const dur = Math.max(0.4, clipDur * 0.98);
+      this._oneShotTimer = Math.max(this._oneShotTimer, dur);
+      this._gaitLocked = true;
+      this.animState = 'roll';
+      this._airJumpHold = false;
+      return { ok: true, duration: dur, role: name };
+    }
+    const dodged = this.playDodge(dir);
+    return { ok: !!dodged, duration: settings.drc?.dodgeDuration ?? 0.42, role: dodged ? 'dodge' : null };
+  }
+
+  /** Last exclusive roll clip duration (for impulse sync). */
+  getRollClipDuration(dir) {
+    const role = ROLL_ROLE[dir] || 'rollB';
+    for (const name of [role, `combat_mobility:${role}`]) {
+      const act = this.actions.get(name);
+      const d = act?.getClip?.()?.duration;
+      if (d > 0) return d;
+    }
+    return settings.drc?.rollDuration ?? 0.55;
+  }
+
+  /**
+   * Sprint slide one-shot — prod running-slide (Shift+Ctrl while sprint).
+   * @returns {boolean}
+   */
+  playSlide() {
+    for (const name of ['slide', 'combat_mobility:slide', 'slide_kick', 'combat_mobility:slide_kick']) {
+      if (!this.actions.has(name)) continue;
+      this.play(name, 0.06);
+      const act = this.actions.get(name);
+      const dur = act?.getClip?.()?.duration ?? settings.drc?.slideDuration ?? 0.72;
+      this._oneShotTimer = Math.max(this._oneShotTimer, dur * 0.92);
+      this._gaitLocked = true;
+      this.animState = 'slide';
+      return true;
+    }
+    // Fallback: forward roll if slide bake missing
+    return this.playRoll('forward');
+  }
+
+  /**
+   * Air dash one-shot (Deadlock priest airdash_*). Directional when airborne.
+   * @param {'left'|'right'|'forward'|'back'} [dir]
+   */
+  playAirDash(dir = 'forward') {
+    const role =
+      dir === 'left' ? 'airDashL' : dir === 'right' ? 'airDashR' : dir === 'back' ? 'airDashB' : 'airDash';
+    for (const name of [role, `combat_mobility:${role}`, 'airDash', 'combat_mobility:airDash', 'leap']) {
+      if (!this.actions.has(name)) continue;
+      this.play(name, 0.05, { exclusive: true });
+      const act = this.actions.get(name);
+      const dur = act?.getClip?.()?.duration ?? 0.7;
+      this._oneShotTimer = Math.max(this._oneShotTimer, dur * 0.95);
+      this._gaitLocked = true;
+      this.animState = 'airDash';
+      return { ok: true, duration: dur };
+    }
+    return this.playDodge(dir);
+  }
+
+  /** Grapple / zipline phases — grab · loop · reel · detach. */
+  playGrapple(phase = 'grab') {
+    const map = {
+      grab: 'grappleGrab',
+      loop: 'grappleLoop',
+      reel: 'grappleReel',
+      detach: 'grappleDetach',
+      wait: 'grappleGrab'
+    };
+    const role = map[phase] || 'grappleGrab';
+    for (const name of [role, `combat_mobility:${role}`]) {
+      if (!this.actions.has(name)) continue;
+      this.play(name, 0.08);
+      const act = this.actions.get(name);
+      const dur = act?.getClip?.()?.duration ?? 1;
+      this._oneShotTimer = Math.max(this._oneShotTimer, phase === 'loop' ? 0.2 : dur * 0.9);
+      this._gaitLocked = true;
+      this.animState = 'grapple';
+      return true;
+    }
+    return false;
+  }
+
+  /** Ride / skate loop (Deadlock skate + windsurf). */
+  playRide(moving = false) {
+    const role = moving ? 'rideRun' : 'ride';
+    for (const name of [role, `combat_mobility:${role}`, 'ride', 'combat_mobility:ride']) {
+      if (!this.actions.has(name)) continue;
+      this.play(name, 0.12);
+      this.animState = 'ride';
+      return true;
+    }
+    return false;
+  }
+
+  playMantle() {
+    for (const name of ['mantle', 'combat_mobility:mantle']) {
+      if (!this.actions.has(name)) continue;
+      this.play(name, 0.08, { exclusive: true });
+      const act = this.actions.get(name);
+      const dur = act?.getClip?.()?.duration ?? 1;
+      this._oneShotTimer = Math.max(this._oneShotTimer, dur * 0.95);
+      this._gaitLocked = true;
+      this.animState = 'mantle';
+      return true;
+    }
+    return false;
+  }
+
+  /** Parry / block one-shot (sword_shield block clip as longbow has no parry bake). */
+  playParry() {
+    for (const name of ['parry', 'block', 'sword_shield:block', 'combat_mobility:parry']) {
+      if (this.actions.has(name)) {
+        this.play(name, 0.08);
+        const act = this.actions.get(name);
+        const dur = act?.getClip?.()?.duration ?? 0.45;
+        this._oneShotTimer = Math.max(this._oneShotTimer, dur * 0.9);
+        this._gaitLocked = true;
+        this.animState = 'parry';
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Summary for lab Character tab. */
+  getLabSummary() {
+    const race = raceDef(this.raceId);
+    const loadout = this.equipment?.loadout || {};
+    const weaponSlot = ['sword', 'axe', 'hammer', 'spear', 'staff', 'bow'].find(
+      (s) => loadout[s] && loadout[s] !== 'none'
+    );
+    return {
+      raceId: this.raceId,
+      raceLabel: race?.label || this.raceId,
+      raceShort: race?.short || '',
+      kitUrl: kitUrlForRace(this.raceId),
+      atlasUrl: atlasUrlForRace(this.raceId),
+      presetId: this.presetId,
+      animPackId: this.animPackId,
+      heightM: this.height,
+      weaponSlot: weaponSlot || null,
+      weaponVariant: weaponSlot ? loadout[weaponSlot] : null,
+      loadout: { ...loadout },
+      clips: this.listAnimRoles(),
+      rideActive: !!this._rideActive
+    };
+  }
+
+  async _bindPack(packId) {
+    if (this._boundPacks.has(packId)) return;
+    const pack = ANIM_PACKS[packId];
+    if (!pack) return;
+
+    const roleMap = {
+      idle: LoopRepeat,
+      cast: LoopRepeat,
+      attack: LoopOnce,
+      attack1: LoopOnce,
+      attack2: LoopOnce,
+      attack3: LoopOnce,
+      finisher: LoopOnce,
+      finisherAir: LoopOnce,
+      jumpAttack: LoopOnce,
+      blockHit: LoopOnce,
+      cast: LoopOnce,
+      hitReact: LoopOnce,
+      knockedUp: LoopOnce,
+      stun: LoopOnce,
+      blownAway: LoopOnce,
+      getup: LoopOnce,
+      airDash: LoopOnce,
+      airDashL: LoopOnce,
+      airDashR: LoopOnce,
+      airDashB: LoopOnce,
+      leap: LoopOnce,
+      mantle: LoopOnce,
+      slideGetup: LoopOnce,
+      grappleGrab: LoopOnce,
+      grappleLoop: LoopRepeat,
+      grappleDetach: LoopOnce,
+      grappleReel: LoopOnce,
+      ride: LoopRepeat,
+      rideRun: LoopRepeat,
+      block: LoopOnce,
+      parry: LoopOnce,
+      walk: LoopRepeat,
+      run: LoopRepeat,
+      walkL: LoopRepeat,
+      walkR: LoopRepeat,
+      runL: LoopRepeat,
+      runR: LoopRepeat,
+      jump: LoopOnce,
+      fallLoop: LoopRepeat,
+      fall: LoopRepeat,
+      fallIdle: LoopRepeat,
+      fallLand: LoopOnce,
+      fallRoll: LoopOnce,
+      dodgeL: LoopOnce,
+      dodgeR: LoopOnce,
+      dodgeF: LoopOnce,
+      dodgeB: LoopOnce,
+      rollL: LoopOnce,
+      rollR: LoopOnce,
+      rollF: LoopOnce,
+      rollB: LoopOnce,
+      slide: LoopOnce,
+      frontflip: LoopOnce,
+      backflip: LoopOnce,
+      gunplay: LoopOnce,
+      spin: LoopOnce,
+      draw: LoopOnce,
+      reload: LoopOnce,
+      skill1: LoopOnce,
+      skill2: LoopOnce,
+      skill3: LoopOnce,
+      skill4: LoopOnce,
+      skill5: LoopOnce,
+      idleAim: LoopRepeat,
+      walkB: LoopRepeat,
+      runB: LoopRepeat,
+      runFL: LoopRepeat,
+      runFR: LoopRepeat,
+      runBL: LoopRepeat,
+      runBR: LoopRepeat,
+      kick: LoopOnce,
+      hurricane: LoopOnce,
+      stomp: LoopOnce,
+      uppercut: LoopOnce
+    };
+
+    for (const [role, rel] of Object.entries(pack)) {
+      const name =
+        this.actions.has(role) && packId !== this.animPackId ? `${packId}:${role}` : role;
+      const urls = bakedClipUrlsForRole(rel);
+      let loaded = false;
+      /** @type {{ url: string, matched: import('three').AnimationClip }|null} */
+      let fallbackNoHands = null;
+
+      // 2H melee idle — author FBX first (sword_shield pack stance)
+      if (
+        !loaded &&
+        role === 'idle' &&
+        packId === 'sword_shield' &&
+        this.model &&
+        MELEE_FBX_URLS?.idle2h
+      ) {
+        for (const fbxUrl of MELEE_FBX_URLS.idle2h) {
+          try {
+            const clip = await loadFbxClipRematched(fbxUrl, this.model, name);
+            if (clip?.tracks?.length) {
+              this._registerClip(name, clip, LoopRepeat);
+              console.info(
+                `[CharacterController] clip ${name} ← 2H MELEE FBX ${fbxUrl} tracks=${clip.tracks.length}`
+              );
+              loaded = true;
+              break;
+            }
+          } catch {
+            /* next url */
+          }
+        }
+      }
+
+      for (const url of urls) {
+        if (loaded) break;
+        try {
+          if (/\.fbx$/i.test(url) && this.model) {
+            const clip = await loadFbxClipRematched(url, this.model, name);
+            if (clip?.tracks?.length) {
+              this._registerClip(name, clip, roleMap[role] ?? LoopOnce);
+              console.info(
+                `[CharacterController] clip ${name} ← FBX ${url} tracks=${clip.tracks.length}`
+              );
+              loaded = true;
+              break;
+            }
+            continue;
+          }
+          const raw = await loadBakedClipJson(url);
+          raw.name = name;
+          const matched = rematchClipToSkeleton(this.model, raw, { stripPositions: true });
+          if (!matched.tracks.length) {
+            console.warn(`[CharacterController] empty tracks: ${url}`);
+            continue;
+          }
+          // Prefer clips that drive hands for idle (prod standing-idle has hands;
+          // open magic/standing idle does not → broken bind-pose hands on Toon).
+          if (role === 'idle') {
+            const hasHand = matched.tracks.some((t) => /Hand\.quaternion$/i.test(t.name));
+            if (!hasHand) {
+              if (!fallbackNoHands) fallbackNoHands = { url, matched };
+              console.warn(
+                `[CharacterController] idle without Hand tracks (try next): ${url}`
+              );
+              continue;
+            }
+          }
+          this._registerClip(name, matched, roleMap[role] ?? LoopRepeat);
+          console.info(`[CharacterController] clip ${name} ← ${url} tracks=${matched.tracks.length}`);
+          loaded = true;
+          break;
+        } catch {
+          /* try next URL */
+        }
+      }
+      if (!loaded && fallbackNoHands) {
+        this._registerClip(name, fallbackNoHands.matched, roleMap[role] ?? LoopRepeat);
+        console.warn(
+          `[CharacterController] idle fallback (no hands) ← ${fallbackNoHands.url}`
+        );
+        loaded = true;
+      }
+      if (!loaded) {
+        // Real flip FBX from Open when baked JSON missing (striker / extra packs)
+        if ((role === 'frontflip' || role === 'backflip') && this.model) {
+          const fbxList = FLIP_FBX_URLS[role] || [];
+          for (const fbxUrl of fbxList) {
+            try {
+              const clip = await loadFbxClipRematched(fbxUrl, this.model, role);
+              if (clip?.tracks?.length) {
+                this._registerClip(name, clip, LoopOnce);
+                console.info(
+                  `[CharacterController] clip ${name} ← FBX ${fbxUrl} tracks=${clip.tracks.length}`
+                );
+                loaded = true;
+                break;
+              }
+            } catch {
+              /* next */
+            }
+          }
+        }
+        // Fall locomotion FBX (author D:\Games\Models → public/anim/locomotion/fall)
+        const fallRoles = ['fallLoop', 'fall', 'fallLand', 'fallRoll', 'fallIdle'];
+        if (!loaded && fallRoles.includes(role) && this.model) {
+          const fbxList = FALL_FBX_URLS[role] || [];
+          const loop =
+            role === 'fallLoop' || role === 'fall' || role === 'fallIdle'
+              ? LoopRepeat
+              : LoopOnce;
+          for (const fbxUrl of fbxList) {
+            try {
+              const clip = await loadFbxClipRematched(fbxUrl, this.model, role);
+              if (clip?.tracks?.length) {
+                this._registerClip(name, clip, loop);
+                console.info(
+                  `[CharacterController] clip ${name} ← FALL FBX ${fbxUrl} tracks=${clip.tracks.length}`
+                );
+                loaded = true;
+                break;
+              }
+            } catch {
+              /* next */
+            }
+          }
+        }
+      }
+      if (!loaded) {
+        console.warn(`[CharacterController] clip fail role=${role}`, rel);
+      }
+    }
+
+    this._boundPacks.add(packId);
+  }
+
+  _registerClip(name, clip, loopMode) {
+    if (!this.mixer) return;
+    const action = this.mixer.clipAction(clip);
+    action.setLoop(loopMode, loopMode === LoopOnce ? 1 : Infinity);
+    action.clampWhenFinished = loopMode === LoopOnce;
+    this.actions.set(name, action);
+  }
+
+  applyLoadout(loadout, meta = {}) {
+    if (!this.model) return { matched: 0, missing: ['no-model'] };
+    if (meta.presetId) this.presetId = meta.presetId;
+    const race = raceDef(this.raceId);
+    const clean = { ...loadout };
+    delete clean.bag;
+    delete clean.wood;
+    delete clean.quiver;
+    delete clean.carry;
+    delete clean.showUtility;
+    const meshIds = loadoutToMeshIds(race.prefix, clean);
+    // Prefer EquipmentManager exclusive apply (slot-safe) then mesh_ids safety net
+    let report = this.equipment?.applyLoadout?.(clean);
+    if (!report || (report.matched || 0) < 2) {
+      report = this.equipment?.applyMeshIds?.(meshIds) || applyMeshIdsExclusive(this.model, meshIds);
+    }
+    this.equipment?.hideUtility?.();
+    reGroundToonKit(this.model, 0);
+    this.height = this.model.userData.deployHeightM || this.height;
+    this.headPosition.set(0, this.height * 0.86, 0);
+    this.bones = this.equipment?.findBones?.() || this.bones;
+
+    // Weapon mesh → anim pack (staff→magic, bow→longbow, melee→sword_shield)
+    const wantPack = animPackForLoadout(clean, meta.pack || this.animPackId);
+    if (wantPack !== this.animPackId || meta.forcePack) {
+      // Fire-and-forget bind; callers can await syncAnimPackFromLoadout
+      this._pendingPack = wantPack;
+      this.syncAnimPackFromLoadout({ packHint: meta.pack }).catch(() => {});
+    } else if (this.actions.has('idle') && this.animState === 'idle') {
+      this.play('idle', 0.2);
+    }
+    return report;
+  }
+
+  /**
+   * Bind anim pack from current equipment loadout (weapon slot SSOT).
+   * @param {{ packHint?: string }} [opts]
+   */
+  async syncAnimPackFromLoadout(opts = {}) {
+    const loadout = this.equipment?.loadout || {};
+    const pack = animPackForLoadout(loadout, opts.packHint || this.animPackId);
+    const slot = activeWeaponSlot(loadout);
+    await this.setAnimPack(pack);
+    await this._bindPack('combat_mobility');
+    await this._bindPack('reactions');
+    console.info(
+      `[CharacterController] weapon pack ${pack} slot=${slot || 'none'} · ${packCombatBlurb(pack)}`
+    );
+    return pack;
+  }
+
+  applyPreset(presetId) {
+    const preset = this.presets.find((p) => p.id === presetId);
+    if (!preset) return null;
+    this.presetId = presetId;
+    this.animPackId = this._packFromPreset(preset);
+    return this.applyLoadout(preset.loadout, { pack: preset.pack, presetId, forcePack: true });
+  }
+
+  /**
+   * Combat one-shot for equipped weapon pack (attack vs cast).
+   * @param {'attack'|'cast'|'block'|'finisher'|'finisherAir'} intent
+   */
+  playWeaponCombat(intent = 'attack') {
+    const pack = this.animPackId || 'sword_shield';
+    if (intent === 'block') return this.playParry() || this.requestOneShot('block');
+    if (pack === 'magic' || intent === 'cast') {
+      return this.requestOneShot('cast') || this.requestOneShot('attack');
+    }
+    if (intent === 'finisherAir') {
+      return this.playMeleeFinisher({ airborne: true });
+    }
+    if (intent === 'finisher') {
+      return this.playMeleeFinisher({ airborne: false });
+    }
+    // Default light: advance 3-hit combo (not the jump-dash finisher clip)
+    if (pack === 'sword_shield' || intent === 'attack') {
+      return this.playMeleeComboLight() || this.requestOneShot('attack');
+    }
+    return this.requestOneShot('attack') || this.requestOneShot('cast');
+  }
+
+  /**
+   * Grounded light melee — cycles attack1 → attack2 → attack3 within chain window.
+   * Does NOT play the jump-dash finisher (that is playMeleeFinisher).
+   * @returns {{ ok: boolean, step: number, role: string|null, kind: 'light'|'none' }}
+   */
+  playMeleeComboLight() {
+    const cfg = settings.meleeCombo || {};
+    const maxHits = Math.max(1, Math.min(3, cfg.hits ?? 3));
+    const windowS = cfg.chainWindow ?? 0.85;
+    const now = this._simTime;
+    let step = 0;
+    if (this._meleeComboStep >= 0 && now <= this._meleeComboUntil) {
+      step = Math.min(this._meleeComboStep + 1, maxHits - 1);
+    } else {
+      step = 0;
+    }
+    const roles = [`attack${step + 1}`, 'attack1', 'attack2', 'attack3'];
+    // Prefer exact step role, then any light role, never jump-dash `attack` first
+    let played = null;
+    for (const role of roles) {
+      if (this.requestOneShot(role)) {
+        played = role;
+        break;
+      }
+    }
+    if (!played) {
+      // Last resort: CDN slash if bound under attack without combo bakes
+      if (this.requestOneShot('attack')) {
+        played = 'attack';
+      }
+    }
+    if (!played) return { ok: false, step, role: null, kind: 'none' };
+    this._meleeComboStep = step;
+    this._meleeComboUntil = now + windowS;
+    this.animState = 'attack';
+    return { ok: true, step, role: played, kind: 'light' };
+  }
+
+  /**
+   * Air combo starters — dive (jumpAttack) then aerial 2 / 3. Separate chain from ground.
+   * @returns {{ ok: boolean, step: number, role: string|null, kind: 'air'|'none' }}
+   */
+  playMeleeComboAir() {
+    const windowS = (settings.meleeCombo?.airChainWindow ?? settings.meleeCombo?.chainWindow) || 0.95;
+    const now = this._simTime;
+    let step = 0;
+    if (this._airComboStep >= 0 && now <= this._airComboUntil) {
+      step = Math.min(this._airComboStep + 1, 2);
+    } else {
+      step = 0;
+    }
+    const byStep = [
+      ['jumpAttack', 'finisherAir', 'attack1'],
+      ['attack2', 'attack1', 'jumpAttack'],
+      ['attack3', 'finisherAir', 'attack']
+    ];
+    let played = null;
+    for (const role of byStep[step]) {
+      if (this.requestOneShot(role)) {
+        played = role;
+        break;
+      }
+    }
+    if (!played) {
+      const fin = this.playMeleeFinisher({ airborne: true });
+      if (fin?.ok) {
+        this._airComboStep = step;
+        this._airComboUntil = now + windowS;
+        return { ok: true, step, role: fin.role, kind: 'air' };
+      }
+      return { ok: false, step, role: null, kind: 'none' };
+    }
+    this._airComboStep = step;
+    this._airComboUntil = now + windowS;
+    this.animState = 'attack';
+    return { ok: true, step, role: played, kind: 'air' };
+  }
+
+  /**
+   * Finisher: current sword_shield “attack” (jump/dash) or air drop.
+   * Resets light combo chain.
+   * @param {{ airborne?: boolean }} [opts]
+   * @returns {{ ok: boolean, step: number, role: string|null, kind: 'finisher'|'finisherAir'|'none' }}
+   */
+  playMeleeFinisher(opts = {}) {
+    const air = !!opts.airborne;
+    this._meleeComboStep = -1;
+    this._meleeComboUntil = 0;
+    const prefer = air
+      ? ['jumpAttack', 'finisherAir', 'attack', 'finisher', 'attack3']
+      : ['finisher', 'attack', 'jumpAttack', 'finisherAir', 'attack3'];
+    for (const role of prefer) {
+      if (this.requestOneShot(role)) {
+        this.animState = 'attack';
+        return { ok: true, step: -1, role, kind: air ? 'finisherAir' : 'finisher' };
+      }
+    }
+    return { ok: false, step: -1, role: null, kind: 'none' };
+  }
+
+  /**
+   * Resolve next melee one-shot from combat context.
+   * @param {{ airborne?: boolean, justLanded?: boolean, largeMmTowardTarget?: boolean, forceFinisher?: boolean }} ctx
+   */
+  playMeleeAttack(ctx = {}) {
+    const pack = this.animPackId || 'sword_shield';
+    if (pack === 'magic') {
+      const ok = this.requestOneShot('cast') || this.requestOneShot('attack');
+      return { ok, step: -1, role: ok ? 'cast' : null, kind: ok ? 'cast' : 'none' };
+    }
+    if (pack !== 'sword_shield' && pack !== 'longbow') {
+      const ok = this.requestOneShot('attack');
+      return { ok, step: -1, role: ok ? 'attack' : null, kind: ok ? 'light' : 'none' };
+    }
+    if (pack === 'longbow') {
+      const ok = this.requestOneShot('attack');
+      return { ok, step: -1, role: ok ? 'attack' : null, kind: ok ? 'ranged' : 'none' };
+    }
+    // sword_shield: air or large MM → finisher; else light combo
+    if (ctx.forceFinisher || ctx.airborne || ctx.justLanded || ctx.largeMmTowardTarget) {
+      return this.playMeleeFinisher({
+        airborne: !!(ctx.airborne || ctx.justLanded)
+      });
+    }
+    return this.playMeleeComboLight();
+  }
+
+  /**
+   * Play clip with improved locomotion/combat blending (Warlords production feel).
+   * Gait uses longer fades; attacks/casts shorter.
+   * @param {string} name
+   * @param {number} [fadeDuration]
+   * @param {{ exclusive?: boolean }} [opts] exclusive = fade out every other action (rolls)
+   */
+  play(name, fadeDuration = 0.35, opts = {}) {
+    const next = this.actions.get(name);
+    if (!next) return;
+    if (next === this.current && next.isRunning() && !opts.exclusive) return;
+
+    // Smoother gait blends; snappier combat one-shots
+    const isGait =
+      /^(idle|walk|run|walkL|walkR|runL|runR)$/i.test(name) ||
+      /:idle$|:walk$|:run$/i.test(name);
+    const isCombat =
+      /attack|finisher|cast|dodge|roll|slide|jump|parry|block|skill|gunplay|charg|reload|whip|hitReact|knocked|stun|blown|getup|mantle|airDash/i.test(
+        name
+      );
+    let fade = fadeDuration;
+    if (isGait) fade = Math.max(fade, settings.character?.gaitBlend ?? 0.28);
+    else if (/charg|skill2/i.test(name))
+      fade = Math.max(fade, settings.character?.chargeBlend ?? 0.2);
+    else if (isCombat) fade = Math.min(fade, settings.character?.combatBlend ?? 0.12);
+    if (opts.exclusive) fade = Math.min(fade, 0.08);
+
+    // Rolls/dodges: kill residual weights so limbs don't dual-bind (deform)
+    if (opts.exclusive) {
+      for (const [, act] of this.actions) {
+        if (act === next) continue;
+        try {
+          if (act.isRunning() || act.getEffectiveWeight() > 0.02) {
+            act.fadeOut(fade);
+          }
+        } catch {
+          /* */
+        }
+      }
+    }
+
+    next.reset();
+    next.enabled = true;
+    next.setEffectiveTimeScale(1);
+    next.setEffectiveWeight(1);
+    try {
+      if (opts.exclusive || isCombat) {
+        next.setLoop(LoopOnce, 1);
+        next.clampWhenFinished = true;
+      }
+    } catch {
+      /* */
+    }
+
+    if (this.current && this.current !== next && fade > 0 && !opts.exclusive) {
+      next.crossFadeFrom(this.current, fade, true);
+    } else if (opts.exclusive) {
+      next.fadeIn(fade);
+    } else if (this.current && this.current !== next && fade > 0) {
+      next.crossFadeFrom(this.current, fade, true);
+    }
+    next.play();
+    this.current = next;
+  }
+
+  /**
+   * Channel cast pose — loops cast clip while true; restores gait when false.
+   * @param {boolean} isCasting
+   * @param {{ aimX?: number, aimY?: number, aimZ?: number }} [aim]
+   */
+  setCasting(isCasting, aim = null) {
+    const next = !!isCasting;
+    if (aim && Number.isFinite(aim.aimX)) {
+      this._castAim = { x: aim.aimX, y: aim.aimY ?? 1.2, z: aim.aimZ ?? 0 };
+    }
+    if (next === this._castingExternal) return;
+    this._castingExternal = next;
+    if (next) {
+      // Cast needs drawn weapon in hand
+      this.weaponSheath?.unsheath?.('cast');
+      // Hold gait lock + loop cast for channel window
+      this._gaitLocked = true;
+      this._oneShotTimer = 0;
+      if (this.actions.has('cast')) {
+        const act = this.actions.get('cast');
+        try {
+          act.setLoop(LoopRepeat, Infinity);
+          act.clampWhenFinished = false;
+        } catch {
+          /* three version variance */
+        }
+        this.animState = 'cast_loop';
+        this.play('cast', 0.12);
+      } else if (this.actions.has('attack')) {
+        this.animState = 'cast_loop';
+        this.play('attack', 0.12);
+      }
+    } else {
+      this._gaitLocked = false;
+      this._castAim = null;
+      // Restore one-shot loop mode on cast clip if needed
+      if (this.actions.has('cast')) {
+        try {
+          const act = this.actions.get('cast');
+          act.setLoop(LoopOnce, 1);
+          act.clampWhenFinished = true;
+        } catch {
+          /* */
+        }
+      }
+      if (this.animState === 'cast_loop') {
+        this.animState = 'idle';
+        if (this.actions.has('idle')) this.play('idle', 0.2);
+      }
+    }
+  }
+
+  /**
+   * @param {0|1|2|number} level 0 idle, 1 walk, 2 run
+   * @param {boolean} [sprinting]
+   * @param {{ strafe?: 'left'|'right'|null, octant?: string, aiming?: boolean }} [opts]
+   */
+  setGait(level, sprinting = false, opts = {}) {
+    if (this._gaitLocked) return;
+    if (this._castingExternal && level === 0) return;
+    const g = sprinting ? 2 : MathUtils.clamp(level | 0, 0, 2);
+    const strafe = opts.strafe === 'left' || opts.strafe === 'right' ? opts.strafe : null;
+    const octant = typeof opts.octant === 'string' ? opts.octant : null;
+    const aiming = !!opts.aiming;
+    const key = `${g}:${this.animPackId === 'rifle' ? octant || 'F' : strafe || 'fwd'}:${aiming ? 'ads' : 'hip'}`;
+    if (key === this._gaitKey && this.animState !== 'attack') return;
+    this._gait = g;
+    this._gaitKey = key;
+    this._strafe = strafe;
+    this._sprinting = !!sprinting || g >= 2;
+
+    if (g === 0) {
+      if (this.animState === 'cast_loop') return;
+      const idleRole =
+        this.animPackId === 'rifle' && aiming && this.actions.has('idleAim')
+          ? 'idleAim'
+          : this.actions.has('idle')
+            ? 'idle'
+            : null;
+      if (idleRole) {
+        this.animState = 'idle';
+        this.play(idleRole, 0.2);
+      }
+      return;
+    }
+
+    // Training rifle: 8-way Mixamo octant (rifleAnimSsot) — real move, not L/R-only
+    if (this.animPackId === 'rifle') {
+      const prefer = rifleGaitRoles(g, octant || 'F');
+      for (const role of prefer) {
+        if (this.actions.has(role)) {
+          this.animState = g >= 2 ? 'run' : 'walk';
+          this.play(role, 0.12);
+          return;
+        }
+      }
+    }
+
+    // Focus strafe: prefer walkL/R or runL/R; fall back to forward walk/run
+    if (strafe) {
+      const side = strafe === 'left' ? 'L' : 'R';
+      const prefer =
+        g >= 2
+          ? [`run${side}`, `walk${side}`, 'run', 'walk']
+          : [`walk${side}`, `run${side}`, 'walk', 'run'];
+      for (const role of prefer) {
+        if (this.actions.has(role)) {
+          this.animState = role.startsWith('run') ? 'run' : 'walk';
+          this.play(role, 0.14);
+          return;
+        }
+      }
+    }
+
+    if (g === 1) {
+      const walk = this.actions.has('walk') ? 'walk' : this.actions.has('run') ? 'run' : null;
+      if (walk) {
+        this.animState = 'walk';
+        this.play(walk, 0.18);
+      }
+    } else {
+      const run = this.actions.has('run') ? 'run' : this.actions.has('walk') ? 'walk' : null;
+      if (run) {
+        this.animState = 'run';
+        this.play(run, 0.15);
+      }
+    }
+  }
+
+  requestOneShot(role) {
+    let name = null;
+    const tryNames = [];
+    if (role === 'attack') {
+      tryNames.push('attack', 'sword_shield:attack', 'finisher', 'cast');
+    } else if (role === 'cast') {
+      tryNames.push('cast', 'attack');
+    } else if (role === 'block') {
+      tryNames.push('block');
+    } else if (role === 'finisher') {
+      tryNames.push('finisher', 'attack', 'sword_shield:attack');
+    } else if (role === 'finisherAir' || role === 'jumpAttack') {
+      tryNames.push('jumpAttack', 'finisherAir', 'attack', 'finisher');
+    } else if (/^attack[123]$/.test(role)) {
+      tryNames.push(role, `sword_shield:${role}`, 'attack1', 'attack2', 'attack3');
+    } else if (role === 'hitReact' || role === 'knockedUp' || role === 'stun' || role === 'blownAway') {
+      tryNames.push(
+        role,
+        'hitReact',
+        'knockedUp',
+        'stun',
+        'blownAway',
+        'reactions:hitReact',
+        'reactions:knockedUp',
+        'reactions:stun',
+        'reactions:blownAway'
+      );
+    } else if (role === 'getup' || role === 'slideGetup') {
+      tryNames.push('slideGetup', 'getup', 'combat_mobility:slideGetup', 'reactions:getup');
+    } else {
+      tryNames.push(role);
+    }
+    for (const n of tryNames) {
+      if (this.actions.has(n)) {
+        name = n;
+        break;
+      }
+    }
+    if (!name) return false;
+
+    this._gaitLocked = true;
+    this.animState =
+      role === 'cast'
+        ? 'cast_loop'
+        : role === 'reload' || /reload/i.test(name)
+          ? 'reload'
+          : 'attack';
+    this.play(name, 0.1);
+    const act = this.actions.get(name);
+    // Pistol fire / draw / reload cadence (TPS-aligned timeScale)
+    if (this.animPackId === 'pistol' && act) {
+      if (/reload/i.test(role + name)) act.timeScale = pistolTimeScale('reload');
+      else if (/draw|block|cast/i.test(role + name)) act.timeScale = pistolTimeScale('draw');
+      else if (/whip|skill3/i.test(role + name)) act.timeScale = pistolTimeScale('whip');
+      else if (/charged|skill2/i.test(role + name)) act.timeScale = pistolTimeScale('charged');
+      else act.timeScale = pistolTimeScale('fire');
+      const tpsRole = /draw|block|cast|reload/i.test(role + name)
+        ? 'draw'
+        : /whip|charged|skill2|skill3/i.test(role + name)
+          ? null
+          : 'fireaim';
+      if (tpsRole) playTpsPistolClip(this.weaponAttach, tpsRole);
+    } else if (act && act.timeScale !== 1) {
+      act.timeScale = 1;
+    }
+    const duration =
+      (act?.getClip?.()?.duration ?? 0.8) / Math.max(0.05, act?.timeScale || 1);
+    // Light combo steps: don't lock gait for full clip (chain window needs free click)
+    const isLight = /^attack[123]$/.test(role) || /^attack[123]$/.test(name);
+    const lockDur = isLight ? Math.min(duration, 0.55) + 0.02 : duration + 0.04;
+    this._oneShotTimer = lockDur;
+    this._attackTimer = this._oneShotTimer;
+    return true;
+  }
+
+  playWeaponAttack() {
+    // Light combo for sword_shield; finisher only via playMeleeAttack context
+    if (this.animPackId === 'sword_shield') {
+      const r = this.playMeleeComboLight();
+      return !!r.ok;
+    }
+    return this.requestOneShot('attack');
+  }
+
+  /**
+   * Physical hit reaction — knocked-up bake (reactions pack).
+   * Prefer overlay flinch; exclusive knockup only via playReaction('knockback'|'blownAway').
+   * @returns {boolean}
+   */
+  playHitReaction() {
+    return this.playReaction('flinch');
+  }
+
+  /**
+   * Take-hit overlay on the live gait (one mixer). Does not cross-fade walk away.
+   * @param {string} role
+   * @param {{ weight?: number, fade?: number, lockGait?: boolean, duration?: number, state?: string }} [opts]
+   */
+  playOverlay(role, opts = {}) {
+    const tryNames = [
+      role,
+      `reactions:${role}`,
+      `combat_mobility:${role}`,
+      'hitReact',
+      'knockedUp',
+      'reactions:hitReact',
+      'reactions:knockedUp'
+    ];
+    let act = null;
+    let name = null;
+    for (const n of tryNames) {
+      if (this.actions.has(n)) {
+        act = this.actions.get(n);
+        name = n;
+        break;
+      }
+    }
+    if (!act) return false;
+    if (this._overlayAct && this._overlayAct !== act) {
+      try {
+        this._overlayAct.fadeOut(0.08);
+      } catch {
+        /* */
+      }
+    }
+    const weight = Math.max(0.2, Math.min(1, opts.weight ?? settings.character?.overlayBlend ?? 0.62));
+    const fade = opts.fade ?? 0.08;
+    try {
+      act.reset();
+      act.enabled = true;
+      act.setLoop(LoopOnce, 1);
+      act.clampWhenFinished = true;
+      act.setEffectiveTimeScale(1);
+      act.setEffectiveWeight(weight);
+      act.play();
+    } catch {
+      return false;
+    }
+    this._overlayAct = act;
+    this._overlayRole = name;
+    const dur = (act.getClip?.()?.duration ?? 0.6) / Math.max(0.05, act.timeScale || 1);
+    this._overlayTimer = Math.min(dur, opts.duration ?? dur) + fade;
+    if (opts.lockGait) {
+      this._gaitLocked = true;
+      this._oneShotTimer = Math.max(this._oneShotTimer, opts.duration ?? Math.min(dur, 1.2));
+      this.animState = opts.state || 'hit';
+    }
+    return true;
+  }
+
+  /**
+   * Status / combat reaction on the locomotion mixer.
+   * @param {'flinch'|'hit'|'knockback'|'stun'|'freeze'|'knockup'|'blownAway'|'blown'|'getup'|string} kind
+   * @param {{ duration?: number, weight?: number }} [opts]
+   */
+  playReaction(kind, opts = {}) {
+    const k = String(kind || 'flinch').toLowerCase();
+    if (k === 'getup') return this.playGetup();
+    if (k === 'stun' || k === 'freeze' || k === 'daze') {
+      const ok = this.playOverlay('stun', {
+        weight: 0.88,
+        lockGait: true,
+        duration: opts.duration ?? 1.15,
+        state: 'stun',
+        fade: 0.07
+      });
+      if (!ok) return this.requestOneShot('hitReact');
+      return ok;
+    }
+    if (k === 'blown' || k === 'blownaway' || k === 'knockup' || k === 'launched') {
+      const ok = this.requestOneShot('blownAway') || this.requestOneShot('knockedUp');
+      if (ok) this.animState = 'blownAway';
+      return ok;
+    }
+    if (k === 'knockback' || k === 'push') {
+      const ok = this.requestOneShot('hitReact') || this.requestOneShot('knockedUp');
+      if (ok) this.animState = 'knockback';
+      return ok;
+    }
+    // Light take-hit: overlay on walk/idle (best blend)
+    return this.playOverlay('hitReact', {
+      weight: opts.weight ?? settings.character?.overlayBlend ?? 0.62,
+      lockGait: false,
+      fade: 0.08,
+      state: 'hit'
+    });
+  }
+
+  playGetup() {
+    for (const name of ['slideGetup', 'getup', 'combat_mobility:slideGetup', 'reactions:getup']) {
+      if (!this.actions.has(name)) continue;
+      this.play(name, 0.1, { exclusive: true });
+      const act = this.actions.get(name);
+      const dur = act?.getClip?.()?.duration ?? 0.8;
+      this._oneShotTimer = Math.max(this._oneShotTimer, dur * 0.92);
+      this._gaitLocked = true;
+      this.animState = 'getup';
+      return true;
+    }
+    this._gaitLocked = false;
+    this.setGait?.(0, false);
+    return false;
+  }
+
+  _bindRigDebug() {
+    try {
+      this.rigDebug?.dispose?.();
+    } catch {
+      /* */
+    }
+    this.rigDebug = new AnimRigDebug(this);
+    this.rigDebug.syncEnabled();
+  }
+
+  playCastFlourish() {
+    this.requestOneShot('cast');
+  }
+
+  /**
+   * Jump one-shot (blend from gait). With holdAir, pose stays until land.
+   * @param {number} [fade=0.08]
+   * @param {{ holdAir?: boolean }} [opts]
+   */
+  playJump(fade = 0.08, opts = {}) {
+    this._airJumpHold = !!opts.holdAir;
+    if (this.actions.has('jump')) {
+      this._gaitLocked = true;
+      this.animState = 'jump';
+      this.play('jump', fade);
+      const duration = this.actions.get('jump')?.getClip()?.duration ?? 0.55;
+      // Hold: clamp near end of jump clip until clearAirJumpHold (landing)
+      if (this._airJumpHold) {
+        this._oneShotTimer = 999;
+        try {
+          const act = this.actions.get('jump');
+          act.clampWhenFinished = true;
+        } catch {
+          /* */
+        }
+      } else {
+        this._oneShotTimer = Math.min(duration, 0.7) + 0.02;
+      }
+      this._attackTimer = this._oneShotTimer;
+      return true;
+    }
+    this._gaitLocked = true;
+    this.animState = 'jump';
+    this._oneShotTimer = this._airJumpHold ? 999 : 0.45;
+    return false;
+  }
+
+  /** Keep jump pose while airborne (called from combat loco). */
+  holdAirJumpPose() {
+    if (!this._airJumpHold) return;
+    if (this._flipActive) return;
+    if (this.animState === 'attack' || this.animState === 'cast_loop') return;
+    if (this.animState === 'fall' || this.animState === 'fallLoop') return;
+    if (this.actions.has('jump') && this.animState !== 'jump') {
+      this.animState = 'jump';
+      this.play('jump', 0.12);
+    }
+    this._gaitLocked = true;
+    this._oneShotTimer = Math.max(this._oneShotTimer, 0.5);
+  }
+
+  /**
+   * Deterministic air locomotion: jump hold → fallLoop when descending.
+   * @param {{ airborne: boolean, vy: number, airTime: number, flipping?: boolean }} state
+   */
+  updateAirLocomotion(state) {
+    if (!state?.airborne) return;
+    if (this._flipActive || state.flipping) return;
+    if (this.animState === 'attack' || this.animState === 'cast_loop' || this.animState === 'charge') {
+      return;
+    }
+    if (this.animState === 'fallLand' || this.animState === 'fallRoll') return;
+
+    if (shouldEnterFall(state)) {
+      this.playFallLoop(FALL_THRESHOLDS.fallInBlend);
+    } else if (this._airJumpHold) {
+      this.holdAirJumpPose();
+    }
+  }
+
+  /**
+   * Loop falling cycle (Fall A Loop.fbx) — preferred while descending.
+   * @param {number} [fade]
+   */
+  playFallLoop(fade = FALL_THRESHOLDS.fallInBlend) {
+    const role =
+      (this.actions.has('fallLoop') && 'fallLoop') ||
+      (this.actions.has('combat_mobility:fallLoop') && 'combat_mobility:fallLoop') ||
+      (this.actions.has('fall') && 'fall') ||
+      (this.actions.has('combat_mobility:fall') && 'combat_mobility:fall') ||
+      (this.actions.has('fallIdle') && 'fallIdle') ||
+      null;
+    if (!role) {
+      // No fall clips — keep jump hold
+      this.holdAirJumpPose();
+      return false;
+    }
+    if (this.animState === 'fallLoop' || this.animState === 'fall') {
+      this._gaitLocked = true;
+      this._oneShotTimer = Math.max(this._oneShotTimer, 0.5);
+      return true;
+    }
+    this._airJumpHold = false;
+    this._gaitLocked = true;
+    this.animState = role.includes('fallLoop') || role === 'fallLoop' ? 'fallLoop' : 'fall';
+    this.play(role, fade);
+    // Loop clips stay locked until land
+    this._oneShotTimer = 999;
+    const act = this.actions.get(role);
+    try {
+      if (act) {
+        act.setLoop(LoopRepeat, Infinity);
+        act.clampWhenFinished = false;
+        act.timeScale = 1;
+      }
+    } catch {
+      /* */
+    }
+    return true;
+  }
+
+  /**
+   * Landing recovery — fallLand or fallRoll (deterministic pick).
+   * @param {{ impactVy: number, horizSpeed: number, wantRoll?: boolean }} impact
+   * @returns {{ role: string, ok: boolean }}
+   */
+  playFallLand(impact = {}) {
+    const pick = pickLandRole(impact);
+    const candidates =
+      pick === FALL_ROLES.fallRoll
+        ? ['fallRoll', 'combat_mobility:fallRoll', 'fallLand', 'combat_mobility:fallLand', 'rollF']
+        : ['fallLand', 'combat_mobility:fallLand', 'fallRoll', 'combat_mobility:fallRoll'];
+    let role = null;
+    for (const r of candidates) {
+      if (this.actions.has(r)) {
+        role = r;
+        break;
+      }
+    }
+    this._airJumpHold = false;
+    if (!role) {
+      this.clearAirJumpHold();
+      return { role: 'idle', ok: false };
+    }
+    const fade = FALL_THRESHOLDS.landOutBlend;
+    this.play(role, fade, { exclusive: true });
+    const act = this.actions.get(role);
+    const dur = act?.getClip?.()?.duration ?? FALL_THRESHOLDS.landLockFloor;
+    try {
+      if (act) {
+        act.setLoop(LoopOnce, 1);
+        act.clampWhenFinished = true;
+        act.timeScale = 1;
+        act.paused = false;
+      }
+    } catch {
+      /* */
+    }
+    this._gaitLocked = true;
+    this._oneShotTimer = Math.max(FALL_THRESHOLDS.landLockFloor, dur * 0.95);
+    this.animState = pick === FALL_ROLES.fallRoll ? 'fallRoll' : 'fallLand';
+    return { role, ok: true };
+  }
+
+  /** Release jump hold on land. Prefer playFallLand when fall clips exist. */
+  clearAirJumpHold() {
+    this._airJumpHold = false;
+    if (
+      this.animState === 'jump' ||
+      this.animState === 'fall' ||
+      this.animState === 'fallLoop'
+    ) {
+      this._gaitLocked = false;
+      this._oneShotTimer = 0;
+      if (this.actions.has('idle')) {
+        this.animState = 'idle';
+        this.play('idle', FALL_THRESHOLDS.landOutBlend);
+      }
+    }
+  }
+
+  /**
+   * Backflip — prefer real striker/backflip clip; procedural tilt only as fallback.
+   * Camera hold yaw is set by combat (setup move — do not whip cam 180°).
+   * @param {number} duration seconds (used if procedural)
+   * @param {{ holdYaw?: number }} [opts]
+   */
+  playBackflip(duration = 0.55, opts = {}) {
+    this._airJumpHold = false;
+    this._flipSign = -1;
+    this._flipCameraHoldYaw = Number.isFinite(opts.holdYaw) ? opts.holdYaw : this.facing;
+    // Real clip path
+    if (this.actions.has('backflip') || this.actions.has('combat_mobility:backflip')) {
+      const role = this.actions.has('backflip') ? 'backflip' : 'combat_mobility:backflip';
+      this.play(role, 0.07, { exclusive: true });
+      const act = this.actions.get(role);
+      const dur = act?.getClip?.()?.duration ?? duration;
+      this._flipUseClip = true;
+      this._flipActive = false; // no procedural tilt spin
+      this._flipTime = 0;
+      this._flipDuration = Math.max(0.35, dur * 0.98);
+      this._oneShotTimer = Math.max(this._oneShotTimer, this._flipDuration);
+      this._gaitLocked = true;
+      this.animState = 'flip';
+      return true;
+    }
+    // Procedural fallback
+    this._flipUseClip = false;
+    this._flipTime = 0;
+    this._flipDuration = Math.max(0.2, duration);
+    this._flipActive = true;
+    this.playJump(0.05, { holdAir: false });
+    this._oneShotTimer = Math.max(this._oneShotTimer, duration + 0.05);
+    this.animState = 'jump';
+    return true;
+  }
+
+  /**
+   * Frontflip — real extra/front-flip clip preferred (double-jump / windsurf).
+   * @param {number} duration
+   */
+  playFrontflip(duration = 0.48) {
+    this._airJumpHold = false;
+    this._flipSign = 1;
+    this._flipCameraHoldYaw = null; // frontflip may follow motion
+    if (this.actions.has('frontflip') || this.actions.has('combat_mobility:frontflip')) {
+      const role = this.actions.has('frontflip') ? 'frontflip' : 'combat_mobility:frontflip';
+      this.play(role, 0.07, { exclusive: true });
+      const act = this.actions.get(role);
+      const dur = act?.getClip?.()?.duration ?? duration;
+      this._flipUseClip = true;
+      this._flipActive = false;
+      this._flipDuration = Math.max(0.3, dur * 0.98);
+      this._oneShotTimer = Math.max(this._oneShotTimer, this._flipDuration);
+      this._gaitLocked = true;
+      this.animState = 'flip';
+      return true;
+    }
+    this._flipUseClip = false;
+    this._flipTime = 0;
+    this._flipDuration = Math.max(0.22, duration);
+    this._flipActive = true;
+    this.playJump(0.05, { holdAir: false });
+    this._oneShotTimer = Math.max(this._oneShotTimer, duration + 0.05);
+    this.animState = 'jump';
+    return true;
+  }
+
+  /** True while clip or procedural flip is live. */
+  get isFlipping() {
+    return !!(this._flipActive || (this._flipUseClip && this.animState === 'flip'));
+  }
+
+  get isBackflip() {
+    return this.isFlipping && this._flipSign < 0;
+  }
+
+  /** Cancel flip (land). */
+  clearFlip() {
+    this._flipActive = false;
+    this._flipTime = 0;
+    this._flipSign = -1;
+    this._flipUseClip = false;
+    this._flipCameraHoldYaw = null;
+    this.setLean(0);
+    if (this.animState === 'flip') {
+      this._gaitLocked = false;
+      this.animState = 'idle';
+    }
+  }
+
+  /** World-space cast / projectile origin (hand container or approx chest). */
+  getCastOrigin(out) {
+    const target = out || _castOrigin;
+    const hand = this.bones?.rHand;
+    if (hand) {
+      hand.getWorldPosition(target);
+      return target;
+    }
+    this.root.getWorldPosition(target);
+    target.y += this.height * 0.72;
+    target.z += Math.cos(this.facing) * 0.25;
+    target.x += Math.sin(this.facing) * 0.25;
+    return target;
+  }
+
+  /**
+   * Spine socket world position (barrel / cast / tip / blunt / …).
+   * Uniform location API — skills must not invent offsets when a point exists.
+   * @param {string} [pointId]
+   * @param {import('three').Vector3} [out]
+   */
+  getWeaponSpinePoint(pointId, out) {
+    const target = out || _castOrigin;
+    const attach =
+      this.weaponAttach || getWeaponAttachFromHand(this.bones?.rHand) || findWeaponAttach(this);
+    if (attach) this.weaponAttach = attach;
+    if (attach && !attach.userData?.spine) {
+      stampWeaponSpine(attach, {
+        profile: attach.userData?.profile,
+        family: attach.userData?.spineFamily
+      });
+    }
+    const family =
+      attach?.userData?.spineFamily ||
+      familyFromAttachProfile(attach?.userData?.profile) ||
+      familyFromWeaponType(this.weaponHoldKind || this.animPackId);
+    const id =
+      (pointId && spinePointForVfxAnchor(pointId)) ||
+      attach?.userData?.primarySpine ||
+      primaryCombatPointId(family);
+    if (attach) {
+      getSpineWorldFromAttach(attach, id, target);
+      if (target.lengthSq() > 1e-8) return target;
+    }
+    return this.getWeaponTip(target);
+  }
+
+  /**
+   * Weapon tip / barrel muzzle world position.
+   * Primary combat point by family (gun = barrel, staff = cast, melee = tip).
+   * @param {import('three').Vector3} [out]
+   * @param {number} [tipOffsetM] metres along blade from grip (melee fallback)
+   */
+  getWeaponTip(out, tipOffsetM = 0.55) {
+    const target = out || _castOrigin;
+    const attach =
+      this.weaponAttach || getWeaponAttachFromHand(this.bones?.rHand) || findWeaponAttach(this);
+    if (attach) this.weaponAttach = attach;
+
+    const family =
+      attach?.userData?.spineFamily ||
+      familyFromAttachProfile(attach?.userData?.profile) ||
+      familyFromWeaponType(this.weaponHoldKind || this.animPackId);
+    const primary = attach?.userData?.primarySpine || primaryCombatPointId(family);
+
+    // Guns / bows: barrel first (never chest / hand as muzzle)
+    if ((primary === 'barrel' || attach?.userData?.profile === 'pistol') && attach) {
+      getSpineWorldFromAttach(attach, 'barrel', target);
+      if (target.lengthSq() > 1e-8) return target;
+      if (attach.userData?.muzzle) {
+        getMuzzleWorld(attach, target);
+        if (target.lengthSq() > 1e-8) return target;
+      }
+    }
+
+    // Staff / wand: cast socket
+    if (primary === 'cast' && attach) {
+      getSpineWorldFromAttach(attach, 'cast', target);
+      if (target.lengthSq() > 1e-8) return target;
+    }
+
+    // Prefer mesh-fitted cylinder tip (weapon volume SSOT)
+    if (this.weaponVolume && primary !== 'barrel') {
+      getVolumeTipWorld(this.weaponVolume, target);
+      if (target.lengthSq() > 1e-8) return target;
+    }
+
+    // Any WeaponAttach with muzzle/tip marker (pistol barrel OR measured tip)
+    if (attach?.userData?.muzzle) {
+      getMuzzleWorld(attach, target);
+      if (target.lengthSq() > 1e-8) return target;
+    }
+    if (attach?.userData?.profile === 'pistol') {
+      getMuzzleWorld(attach, target);
+      if (target.lengthSq() > 1e-8) return target;
+    }
+
+    // Mesh tip: farthest visible weapon mesh AABB corner from hand (kit swords)
+    if (this._weaponTipFromVisibleMesh?.(target)) {
+      return target;
+    }
+
+    this.getCastOrigin(target);
+    const off =
+      this.animPackId === 'pistol'
+        ? FLINTLOCK_FIRE.muzzleFallbackM
+        : Number.isFinite(tipOffsetM)
+          ? tipOffsetM
+          : 0.55;
+    // Blade roughly forward + slight up from hand (SI)
+    target.x += Math.sin(this.facing) * off;
+    target.z += Math.cos(this.facing) * off;
+    target.y += off * 0.12;
+    return target;
+  }
+
+  /**
+   * Rebuild oriented cylinder (+0.02 m pad) from equipped weapon mesh.
+   * Call after equip / mesh_ids change. Drives tip, residual, parry, IK grip.
+   * @param {{ debug?: boolean, padM?: number }} [opts]
+   */
+  rebuildWeaponVolume(opts = {}) {
+    const attach =
+      this.weaponAttach || getWeaponAttachFromHand(this.bones?.rHand) || findWeaponAttach(this);
+    const hand = this.bones?.rHand || null;
+    this.weaponVolume = buildWeaponMeshVolume(this.model, {
+      weaponAttach: attach,
+      handBone: hand,
+      padM: opts.padM ?? WEAPON_COLLIDER_PAD_M,
+      debug: !!opts.debug || !!this._debugWeaponVolume
+    });
+    if (this.weaponVolume) {
+      this.weaponHoldKind =
+        this.weaponHoldKind ||
+        normalizeHoldKind(attach?.userData?.profile || this.animPackId || 'sword');
+      const mesh = this.weaponVolume.mesh;
+      if (this.physics?.attachFollowConvex && mesh?.isMesh) {
+        this.physics.attachFollowConvex('weapon_main', mesh, { sensor: true, hullVerts: 64 });
+      }
+    } else {
+      this.physics?.detachFollow?.('weapon_main');
+    }
+    return this.weaponVolume;
+  }
+
+  /**
+   * Farthest corner of visible kit/lab weapon mesh from R hand — blade tip proxy.
+   * @param {import('three').Vector3} out
+   * @returns {boolean}
+   */
+  _weaponTipFromVisibleMesh(out) {
+    const hand = this.bones?.rHand;
+    const root = this.model;
+    if (!hand || !root || !out) return false;
+    hand.getWorldPosition(_castOrigin);
+    const handW = _castOrigin.clone();
+    let bestD = -1;
+    let best = null;
+    const re = /sword|axe|hammer|spear|dagger|knife|blade|mace|staff|wand|club|pick|weapon/i;
+    const ex = /shield|quiver|bag|arrow/i;
+    root.traverse((o) => {
+      if (!o.isMesh || !o.visible) return;
+      const n = o.name || '';
+      if (ex.test(n)) return;
+      if (!re.test(n) && !o.userData?.labWeapon && !o.userData?.weaponAttach) return;
+      o.updateWorldMatrix?.(true, false);
+      const box = new Box3().setFromObject(o);
+      if (box.isEmpty()) return;
+      const { min, max } = box;
+      for (const x of [min.x, max.x]) {
+        for (const y of [min.y, max.y]) {
+          for (const z of [min.z, max.z]) {
+            const d =
+              (x - handW.x) ** 2 + (y - handW.y) ** 2 + (z - handW.z) ** 2;
+            if (d > bestD) {
+              bestD = d;
+              best = { x, y, z };
+            }
+          }
+        }
+      }
+    });
+    if (!best || bestD < 1e-6) return false;
+    out.set(best.x, best.y, best.z);
+    return true;
+  }
+
+  /**
+   * Barrel / blade forward unit (world). Pistol uses grip→muzzle.
+   * @param {import('three').Vector3} [out]
+   */
+  getWeaponForward(out = new Vector3()) {
+    if (this.weaponVolume) {
+      getVolumeAxisWorld(this.weaponVolume, out);
+      if (out.lengthSq() > 1e-8) return out;
+    }
+    const attach =
+      this.weaponAttach || getWeaponAttachFromHand(this.bones?.rHand) || findWeaponAttach(this);
+    if (attach?.userData?.muzzle || attach?.userData?.profile === 'pistol') {
+      return getBarrelForward(attach, out);
+    }
+    out.set(Math.sin(this.facing), 0.05, Math.cos(this.facing)).normalize();
+    return out;
+  }
+
+  /**
+   * Enable windsurf deck/boom IK. Only while WalkController ride is live.
+   * DRC combat checks `_rideActive` and yields locomotion.
+   * @param {boolean} active
+   * @param {number} [yaw] board heading for knee/elbow poles
+   */
+  setRideActive(active, yaw) {
+    this._rideActive = !!active;
+    if (Number.isFinite(yaw)) this._rideYaw = yaw;
+    if (this.rideIk) this.rideIk.setActive(this._rideActive);
+    if (this._rideActive) {
+      // Mount / freeride: hands free for boom/rail IK — sheath weapon
+      this.weaponSheath?.sheath?.('mount');
+      this.playRide?.(false);
+      this.setGait?.(0, false);
+      this._gaitLocked = true;
+    } else {
+      this._gaitLocked = false;
+      this._rideParented = false;
+      // Dismount → draw for combat/land ready
+      this.weaponSheath?.unsheath?.('dismount');
+    }
+  }
+
+  /**
+   * Mark that character.root is parented under the windsurf vehicle seat.
+   * While true, placeAt / world locomotion must not write root.position.
+   * @param {boolean} parented
+   */
+  setRideParented(parented) {
+    this._rideParented = !!parented;
+  }
+
+  get isRideParented() {
+    return !!this._rideParented;
+  }
+
+  /**
+   * Vehicle deployed (hide stowed back mesh) or land (show stow).
+   * @param {boolean} deployed
+   */
+  setBackSlotDeployed(deployed) {
+    this.backSlot?.setDeployed?.(!!deployed);
+  }
+
+  /**
+   * Equip / clear back utility (windsurf, future glider…).
+   * @param {string} itemId
+   * @param {{ modelUrl?: string }} [opts]
+   */
+  async equipBackSlot(itemId, opts = {}) {
+    if (!this.backSlot && this.model) this.backSlot = new BackSlotEquip(this.model);
+    if (!this.backSlot) return null;
+    settings.walk = settings.walk || {};
+    settings.walk.backSlot = itemId || 'none';
+    return this.backSlot.equip(itemId || 'none', opts);
+  }
+
+  /**
+   * World sockets from HoverboardRide.getIkWorldTargets().
+   * @param {Record<string, import('three').Vector3|{x:number,y:number,z:number}>} worldSockets
+   * @param {number} [yaw]
+   */
+  setRideSockets(worldSockets, yaw) {
+    if (Number.isFinite(yaw)) this._rideYaw = yaw;
+    if (!this.rideIk) return;
+    this.rideIk.setTargets(worldSockets);
+  }
+
+  setPose(pose) {
+    // Standing stance only on Bip001 (no Mixamo lotus)
+    settings.character.pose = 'idle';
+    return 'idle';
+  }
+  togglePose() {
+    return this.setPose('idle');
+  }
+  get isSitting() {
+    return false;
+  }
+  get poseWeight() {
+    return 0;
+  }
+
+  setFacing(yaw) {
+    // While parented to board, yaw is board group rotation — keep root local 0
+    if (this._rideParented || this._rideActive) {
+      this._rideYaw = yaw;
+      this.root.rotation.y = 0;
+      return;
+    }
+    this.root.rotation.y = yaw;
+  }
+
+  get facing() {
+    if (this._rideParented || this._rideActive) {
+      return this._rideYaw || 0;
+    }
+    return this.root.rotation.y;
+  }
+
+  setLean(angle) {
+    if (this._flipActive) return; // backflip owns tilt
+    // Board banks the vehicle; keep mild body lean only when not parented
+    if (this._rideParented) return;
+    this.tilt.quaternion.setFromAxisAngle(this.forwardAxis, angle);
+  }
+
+  resetPlacement() {
+    if (this._rideParented) return; // WalkController owns unparent first
+    this.setLean(0);
+    this.setRideActive(false);
+    this._plantFeetAtTerrain(this._sampleHeight(this.root.position.x, this.root.position.z));
+  }
+
+  /**
+   * After windsurf dismount: land controller normal (no ride IK / no parent).
+   * Call only after WalkController has unparented root to the scene.
+   * @param {{ x?: number, y?: number, z?: number, yaw?: number }} [pose]
+   */
+  restoreFromRide(pose = {}) {
+    this._rideParented = false;
+    this.setRideActive(false);
+    this._gaitLocked = false;
+    this._softHipRide = 0;
+    this.clearFlip?.();
+    this.setLean(0);
+    if (this.rideIk) {
+      this.rideIk.setActive(false);
+      this.rideIk.weight = 0;
+      // Restore bind hip Y after absolute drop
+      if (this.rideIk.hips && Number.isFinite(this.rideIk._hipBindY)) {
+        this.rideIk.hips.position.y = this.rideIk._hipBindY;
+      }
+    }
+    this.setBackSlotDeployed(false);
+    // Free root orientation for land loco
+    this.root.rotation.x = 0;
+    this.root.rotation.z = 0;
+    this.root.scale.set(1, 1, 1);
+    if (Number.isFinite(pose.yaw)) this.root.rotation.y = pose.yaw;
+    const x = Number.isFinite(pose.x) ? pose.x : this.root.position.x;
+    const z = Number.isFinite(pose.z) ? pose.z : this.root.position.z;
+    const y = Number.isFinite(pose.y) ? pose.y : this._sampleHeight(x, z);
+    this.placeAt(x, y, z);
+    this.setGait?.(0, false);
+  }
+
+  update(dt) {
+    if (!this.mixer) return;
+
+    // While riding, do not run combat one-shot / cast gait machine over limbs
+    if (!this._rideActive) {
+      if (this._oneShotTimer > 0) {
+        this._oneShotTimer -= dt;
+        this._attackTimer = this._oneShotTimer;
+        if (this._oneShotTimer <= 0) {
+          this._gaitLocked = false;
+          if (this._castingExternal && this.actions.has('cast')) {
+            this.animState = 'cast_loop';
+            this.play('cast', 0.2);
+          } else {
+            const g = this._gait;
+            this._gait = -1;
+            this.setGait(g, g >= 2);
+          }
+        }
+      } else if (!this._gaitLocked) {
+        if (this._castingExternal && this.actions.has('cast') && this._gait === 0) {
+          if (this.animState !== 'cast_loop') {
+            this.animState = 'cast_loop';
+            this.play('cast', 0.15);
+          }
+        } else if (this.animState === 'cast_loop' && !this._castingExternal) {
+          this.animState = 'idle';
+          if (this.actions.has('idle')) this.play('idle', 0.25);
+        }
+      }
+    }
+
+    if (this._overlayTimer > 0) {
+      this._overlayTimer -= dt;
+      if (this._overlayTimer <= 0 && this._overlayAct) {
+        try {
+          this._overlayAct.fadeOut(0.12);
+        } catch {
+          /* */
+        }
+        this._overlayAct = null;
+        this._overlayRole = null;
+      }
+    }
+
+    this._simTime += dt;
+    this.mixer.timeScale = settings.global.animationSpeed;
+    const mixerDt = Math.min(Math.max(0, dt), 1 / 20);
+    if (!this._rideActive && !this._rideParented) this.footGrounder.beginFrame();
+    // Same clamp as Time.maxDelta — clip speed does not jump on a hitch
+    this.mixer.update(mixerDt);
+    if (!this._rideActive && !this._rideParented && this._footGrounded) {
+      this.footGrounder.apply(mixerDt);
+    }
+    updateTpsPistolProp(this.weaponAttach, dt);
+
+    // Auto sheath / unsheath: traversal · mount · air · mobility vs combat draw
+    // oneShotActive only for combat flourishes (not jump/dodge timers)
+    const combatOneShot =
+      this._oneShotTimer > 0 &&
+      !this._rideActive &&
+      (this.animState === 'attack' ||
+        this.animState === 'charge' ||
+        this.animState === 'parry' ||
+        this.animState === 'cast_loop');
+    this.weaponSheath?.update?.({
+      dt,
+      gait: this._gait,
+      sprinting: this._sprinting || this._gait >= 2,
+      rideActive: this._rideActive,
+      rideParented: this._rideParented,
+      animState: this.animState,
+      casting: this._castingExternal,
+      pistolReload: !!this._pistolReload?.active,
+      oneShotActive: combatOneShot
+    });
+
+    // Post-mixer weapon hold residual (SSOT: ObjectStore grudge6-weapon-hold-pose)
+    // Only while drawn — sheathed mesh rides hip/back stow, not hand residual.
+    // Ride owns hands (boom grip) — never fight RideIK with weapon hold.
+    if (
+      this.mixer &&
+      this.model &&
+      !this._rideActive &&
+      !this._pistolReload?.active &&
+      this.weaponSheath?.isDrawn !== false
+    ) {
+      const kind =
+        this.weaponHoldKind ||
+        normalizeHoldKind(this.animPackId === 'magic' ? 'staff' : this.animPackId || 'sword');
+      applyWeaponHoldPose(this.mixer, this._gait, kind, {
+        THREE: { Quaternion, Euler },
+        root: this.model,
+        hand: this.weaponHoldOffKind ? 'both' : 'main',
+        offKind: this.weaponHoldOffKind || null
+      });
+    }
+
+    // Flintlock procedural reload (post-mixer bone / weapon overlay)
+    if (this._pistolReload?.active) {
+      this._pistolReload.update(dt);
+    }
+
+    // Soft hand aim toward soft-lock / cast target (optional HandIK)
+    if (!this._rideActive && this.ik?.aimWeight > 1e-3) this.ik.update?.();
+
+    // Back-slot windsurf sail cloth (stow visible) — vertex wind only
+    this.backSlot?.update?.(dt, { wind: this._gait >= 2 ? 1.35 : this._gait >= 1 ? 1.1 : 0.85 });
+
+    // Procedural flip: full revolution about local right (X) on tilt
+    // _flipSign −1 backflip · +1 frontflip (windsurf deploy)
+    if (this._flipActive) {
+      this._flipTime += dt;
+      const u = MathUtils.clamp(this._flipTime / this._flipDuration, 0, 1);
+      const sign = this._flipSign >= 0 ? 1 : -1;
+      const angle = sign * u * Math.PI * 2;
+      this.tilt.quaternion.setFromAxisAngle(_flipAxis, angle);
+      if (u >= 1) {
+        this._flipActive = false;
+        this.setLean(0);
+      }
+    }
+
+    // Ride IK: default here if WalkController did not call applyRiderIk this frame.
+    // Preferred order (SSOT): walk.update → character.update (mixer) → walk.applyRiderIk
+    if (!this._rideIkExternal) {
+      this.applyRideIk(dt);
+    }
+    this._rideIkExternal = false;
+
+    this.rigDebug?.update?.(dt, {
+      terrainY: this.root?.parent ? this.root.position.y : this.root?.position?.y ?? 0
+    });
+  }
+
+  /**
+   * Post-mixer windsurf IK (feet deck · hands boom).
+   * Call from WalkController.applyRiderIk after character.update so mixer wins first.
+   * @param {number} dt
+   * @param {{ swapLr?: boolean }} [opts]
+   */
+  applyRideIk(dt, opts = {}) {
+    if (!this.rideIk || !(this._rideActive || this.rideIk.weight > 1e-3)) return;
+    const yaw = this._rideYaw || this.facing;
+    _rideFwd.set(Math.sin(yaw), 0, Math.cos(yaw));
+    _rideLeft.set(Math.cos(yaw), 0, -Math.sin(yaw));
+    this.rideIk.update(dt, {
+      boardForward: _rideFwd,
+      boardLeft: _rideLeft,
+      hipDrop: (settings.walk?.hipDrop ?? 0.16) + (this._softHipRide || 0),
+      swapLr: opts.swapLr === true
+    });
+  }
+
+  /**
+   * World feet position. While parented to windsurf, root.position is local —
+   * always return world so camera / dust / systems do not "drag" local coords.
+   */
+  get position() {
+    const p = this.root.parent;
+    const parented =
+      this._rideParented ||
+      p?.name === 'RideSeat' ||
+      p?.name?.startsWith?.('socket_') ||
+      p?.name === 'RideBody';
+    if (parented) {
+      this.root.getWorldPosition(this._worldPos);
+      return this._worldPos;
+    }
+    return this.root.position;
+  }
+
+  /** Write world feet into out (safe while parented). */
+  getWorldPosition(out = this._worldPos) {
+    this.root.getWorldPosition(out);
+    return out;
+  }
+
+  dispose() {
+    this.mixer?.stopAllAction();
+    this.mixer = null;
+    this.actions.clear();
+    disposeObject(this.root);
+  }
+}
