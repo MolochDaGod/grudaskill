@@ -1,0 +1,59 @@
+{
+  "name": "assets.grudge-studio.com — R2 mesh cache",
+  "description": "GLB/KTX2/HDR/WASM are not in Cloudflare's default cached-extension list. Worker responses on this host are DYNAMIC unless Eligible for cache is set. Tags 3d-model / models stay on the origin for targeted purge.",
+  "kind": "zone",
+  "phase": "http_request_cache_settings",
+  "rules": [
+    {
+      "ref": "r2-meshes-cache-everything",
+      "description": "3D + compressed textures — cache everything, ignore querystring, 30d edge",
+      "expression": "(http.host eq \"assets.grudge-studio.com\" and http.request.uri.path.extension in {\"glb\" \"gltf\" \"bin\" \"ktx2\" \"ktx\" \"basis\" \"hdr\" \"exr\" \"wasm\" \"fbx\" \"drc\" \"mp3\" \"ogg\" \"wav\"})",
+      "action": "set_cache_settings",
+      "enabled": true,
+      "action_parameters": {
+        "cache": true,
+        "edge_ttl": { "mode": "override_origin", "default": 2592000 },
+        "browser_ttl": { "mode": "respect_origin" },
+        "respect_strong_etags": true,
+        "origin_cache_control": true,
+        "cache_key": {
+          "ignore_query_strings_order": true,
+          "custom_key": {
+            "query_string": { "exclude": { "all": true } },
+            "header": { "exclude_origin": true }
+          }
+        }
+      }
+    },
+    {
+      "ref": "r2-images-cache-everything",
+      "description": "Icons / HUD / webp — eligible even when a Worker sits in front of R2",
+      "expression": "(http.host eq \"assets.grudge-studio.com\" and http.request.uri.path.extension in {\"png\" \"jpg\" \"jpeg\" \"webp\" \"avif\" \"svg\" \"ico\"})",
+      "action": "set_cache_settings",
+      "enabled": true,
+      "action_parameters": {
+        "cache": true,
+        "edge_ttl": { "mode": "override_origin", "default": 2592000 },
+        "browser_ttl": { "mode": "respect_origin" },
+        "respect_strong_etags": true,
+        "cache_key": {
+          "custom_key": {
+            "query_string": { "exclude": { "all": true } }
+          }
+        }
+      }
+    },
+    {
+      "ref": "r2-catalog-short-ttl",
+      "description": "JSON catalogs — short edge cache, keep querystring for versioned indexes",
+      "expression": "(http.host eq \"assets.grudge-studio.com\" and http.request.uri.path.extension eq \"json\")",
+      "action": "set_cache_settings",
+      "enabled": true,
+      "action_parameters": {
+        "cache": true,
+        "edge_ttl": { "mode": "override_origin", "default": 120 },
+        "browser_ttl": { "mode": "respect_origin" }
+      }
+    }
+  ]
+}

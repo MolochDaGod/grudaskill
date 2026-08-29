@@ -1,10 +1,12 @@
+import { ASSETS_URL, D1_ASSETS_URL, OBJECTSTORE_URL, VFX_API_URL, VFX_ASSETS_URL, assetUrl } from "./cdn";
+
 export const FLEET = {
-  vfxApi: "https://grudge-vfx-api.grudge.workers.dev",
-  vfxAssets: "https://vfx.grudge.studio/assets",
-  cdn: "https://assets.grudge-studio.com",
+  vfxApi: VFX_API_URL,
+  vfxAssets: VFX_ASSETS_URL,
+  cdn: ASSETS_URL,
   github: "https://molochdagod.github.io/ObjectStore",
-  objectStore: "https://objectstore.grudge-studio.com/api/v1",
-  d1Assets: "https://api.grudge-studio.com/assets",
+  objectStore: `${OBJECTSTORE_URL}/api/v1`,
+  d1Assets: D1_ASSETS_URL,
 } as const;
 
 export type VfxEntry = {
@@ -28,12 +30,12 @@ export type FleetSnapshot = {
 };
 
 const CDN_MODELS = {
-  warlord: `${FLEET.cdn}/models/characters/kaykit/Barbarian.glb`,
-  dummy: `${FLEET.cdn}/models/characters/kaykit/Knight.glb`,
-  ranger: `${FLEET.cdn}/models/characters/kaykit/Ranger.glb`,
-  arrow: `${FLEET.cdn}/models/weapons/bow/_arrow_b_1.glb`,
-  bow: `${FLEET.cdn}/models/weapons/bow/Bow.glb`,
-  axe: `${FLEET.cdn}/models/weapons/axe/Axe.glb`,
+  warlord: assetUrl("models/characters/kaykit/Barbarian.glb"),
+  dummy: assetUrl("models/characters/kaykit/Knight.glb"),
+  ranger: assetUrl("models/characters/kaykit/Ranger.glb"),
+  arrow: assetUrl("models/weapons/bow/_arrow_b_1.glb"),
+  bow: assetUrl("models/weapons/bow/Bow.glb"),
+  axe: assetUrl("models/weapons/axe/Axe.glb"),
 } as const;
 
 export const MODEL_URLS = CDN_MODELS;

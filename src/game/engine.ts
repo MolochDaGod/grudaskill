@@ -45,6 +45,7 @@ import {
 import { LabPhysics } from "./physics";
 import { RitualDirector } from "./rituals";
 import { CameraFeel } from "./camera-feel";
+import { pollPad, rumble, type PadFrame } from "./pad";
 import type { KitMode } from "./lab-types";
 import type { HudState } from "./lab-types";
 export type { HudState, KitMode } from "./lab-types";
@@ -127,6 +128,15 @@ const _v2 = new THREE.Vector3();
 const _v3 = new THREE.Vector3();
 const _muzzleFwd = new THREE.Vector3();
 const FALLBACK_FORWARD = new THREE.Vector3(0, 0, -1);
+const FOCUS_HOLD_KEY = "grudge-lab-focus-hold";
+
+function readFocusHold() {
+  try {
+    return localStorage.getItem(FOCUS_HOLD_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
 
 function hexToInt(hex: string): number {
   const n = Number.parseInt(hex.replace("#", ""), 16);
@@ -155,9 +165,11 @@ export class LabEngine {
   private camDist = 9.5;
   private orbiting = false;
   private focused = false;
+  private focusHold = false;
   private focusOrbit = 0;
   private lastX = 0;
   private lastY = 0;
+  private rmbMoved = false;
   private paused = false;
   private editorOpen = false;
   private studioOpen = false;
@@ -195,6 +207,7 @@ export class LabEngine {
   private onHud: (s: HudState) => void;
   private canvas: HTMLCanvasElement;
   private touchMove = { x: 0, y: 0 };
+  private pad: PadFrame | null = null;
   private sparks = new SparkPool();
   private heroActor: SpriteActor | null = null;
   private kitId = "human";
@@ -361,7 +374,8 @@ export class LabEngine {
     this.camera.layers.enable(0);
     this.camera.layers.enable(1);
     this.camera.layers.enable(3);
-    this.hint = "1–6 weapon · R F V T G B class · LMB fire · Tab book";
+    this.hint = "1–6 weapon · R F V T G B class · LMB fire · RMB focus";
+    this.focusHold = readFocusHold();
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.scene.add(this.sparks.points);
     this.bind();
@@ -694,6 +708,17 @@ export class LabEngine {
     this.emit();
   }
 
+  setFocusHold(hold: boolean) {
+    this.focusHold = hold;
+    try {
+      localStorage.setItem(FOCUS_HOLD_KEY, hold ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+    this.hint = hold ? "RMB focus · hold" : "RMB focus · toggle";
+    this.emit();
+  }
+
   resetDummies() {
     this.dummies.forEach((d, i) => {
       const a = (i / this.dummies.length) * Math.PI * 2 + 0.2;
@@ -975,6 +1000,9 @@ export class LabEngine {
       clock: this.weatherSys.clock,
       period: this.weatherSys.period,
       timeScale: this.weatherSys.timeScale,
+      focusHold: this.focusHold,
+      focused: this.focused,
+      pad: this.pad?.connected ? this.pad.id : "",
       tunes:
         this.snapshotTunes && this.kitMode !== "shot"
           ? this.snapshotTunes(this.kitMode, this.kitMode === "bending" ? this.bendElement : this.element)
@@ -1353,15 +1381,20 @@ export class LabEngine {
     if (e.button === 2) {
       this.lastX = e.clientX;
       this.lastY = e.clientY;
+      this.rmbMoved = false;
       this.updatePointer(e);
       const target = this.pickFocusTarget();
-      if (target) {
-        this.focused = true;
-        this.lockDummy = target;
-        this.focusOrbit = 0;
-        this.hint = "Focus · A/D strafe · body on target";
-        this.emit();
-      } else {
+      if (this.focusHold) {
+        if (target) {
+          this.focused = true;
+          this.lockDummy = target;
+          this.focusOrbit = 0;
+          this.hint = "Focus · hold RMB";
+          this.emit();
+        } else {
+          this.orbiting = true;
+        }
+      } else if (!this.focused && !target) {
         this.orbiting = true;
       }
       return;
@@ -1373,18 +1406,45 @@ export class LabEngine {
     }
   };
   private onPointerUp = (e: PointerEvent) => {
-    if (e.button === 2) {
-      this.orbiting = false;
-      this.focused = false;
-      this.focusOrbit = 0;
+    if (e.button !== 2) return;
+    this.orbiting = false;
+    if (this.focusHold) {
+      if (this.focused) {
+        this.focused = false;
+        this.focusOrbit = 0;
+        this.emit();
+      }
+      return;
     }
+    if (this.rmbMoved) return;
+    this.updatePointer(e);
+    const target = this.pickFocusTarget();
+    if (this.focused) {
+      if (target && target !== this.lockDummy) {
+        this.lockDummy = target;
+        this.focusOrbit = 0;
+        this.hint = "Focus · A/D strafe";
+      } else {
+        this.focused = false;
+        this.lockDummy = null;
+        this.focusOrbit = 0;
+        this.hint = "Focus off";
+      }
+    } else if (target) {
+      this.focused = true;
+      this.lockDummy = target;
+      this.focusOrbit = 0;
+      this.hint = "Focus · A/D strafe · RMB to drop";
+    }
+    this.emit();
   };
   private onPointerMove = (e: PointerEvent) => {
     this.updatePointer(e);
     this.ext?.point(this.pointer);
-    if (this.focused) {
-      const dx = e.clientX - this.lastX;
-      const dy = e.clientY - this.lastY;
+    const dx = e.clientX - this.lastX;
+    const dy = e.clientY - this.lastY;
+    if (dx * dx + dy * dy > 16) this.rmbMoved = true;
+    if (this.focused && (e.buttons & 2)) {
       this.lastX = e.clientX;
       this.lastY = e.clientY;
       this.focusOrbit = THREE.MathUtils.clamp(this.focusOrbit - dx * 0.004, -0.7, 0.7);
@@ -1392,8 +1452,6 @@ export class LabEngine {
       return;
     }
     if (this.orbiting) {
-      const dx = e.clientX - this.lastX;
-      const dy = e.clientY - this.lastY;
       this.lastX = e.clientX;
       this.lastY = e.clientY;
       this.camYaw -= dx * 0.005;
@@ -1749,6 +1807,7 @@ export class LabEngine {
       this.fpsAcc = 0;
       this.emit();
     }
+    this.pollGamepad(dt);
     this.cameraFeel.update(dt);
     if (this.hitStop > 0) {
       this.hitStop = Math.max(0, this.hitStop - dt);
@@ -1871,14 +1930,20 @@ export class LabEngine {
     if (this.keys.has("KeyS") || this.keys.has("ArrowDown")) iz -= 1;
     if (this.keys.has("KeyA") || this.keys.has("ArrowLeft")) ix -= 1;
     if (this.keys.has("KeyD") || this.keys.has("ArrowRight")) ix += 1;
-    ix += this.touchMove.x;
-    iz += this.touchMove.y;
+    ix += this.touchMove.x + (this.pad?.moveX ?? 0);
+    iz += this.touchMove.y + (this.pad?.moveY ?? 0);
     const mag = Math.hypot(ix, iz);
     if (mag > 1) {
       ix /= mag;
       iz /= mag;
     }
-    const sprint = this.keys.has("ShiftLeft") || this.keys.has("ShiftRight") || this.buffs.includes("Might") ? 1.55 : 1;
+    const sprint =
+      this.keys.has("ShiftLeft") ||
+      this.keys.has("ShiftRight") ||
+      this.buffs.includes("Might") ||
+      this.pad?.sprint
+        ? 1.55
+        : 1;
     const spd = 5.4 * sprint;
     const vx = (this.moveFwd.x * iz + this.moveRight.x * ix) * spd;
     const vz = (this.moveFwd.z * iz + this.moveRight.z * ix) * spd;
@@ -2243,6 +2308,85 @@ export class LabEngine {
     this.physics.releaseShot(shot.slot);
   }
 
+  private pollGamepad(dt: number) {
+    const was = this.pad?.connected ?? false;
+    const pad = pollPad();
+    this.pad = pad;
+    if (pad.connected !== was) {
+      this.hint = pad.connected ? `Pad · ${pad.id}` : "Pad disconnected";
+      this.emit();
+    }
+    if (!pad.connected) return;
+    if (pad.pauseEdge) this.togglePause();
+    if (pad.bookEdge) this.toggleBook();
+    if (this.paused || this.bookOpen || this.editorOpen) return;
+
+    if (Math.abs(pad.lookX) + Math.abs(pad.lookY) > 0) {
+      if (this.focused) {
+        this.focusOrbit = THREE.MathUtils.clamp(this.focusOrbit - pad.lookX * dt * 1.6, -0.7, 0.7);
+        this.camPitch = THREE.MathUtils.clamp(this.camPitch + pad.lookY * dt * 1.2, 0.12, 1.05);
+      } else {
+        this.camYaw -= pad.lookX * dt * 2.4;
+        this.camPitch = THREE.MathUtils.clamp(this.camPitch + pad.lookY * dt * 1.6, 0.12, 1.15);
+      }
+    }
+
+    if (pad.focusToggleEdge) this.toggleFocusFromPad();
+    if (this.focusHold) {
+      if (pad.focus && !this.focused) this.lockFocusFromPad();
+      if (!pad.focus && this.focused && !this.orbiting) {
+        this.focused = false;
+        this.focusOrbit = 0;
+      }
+    } else if (pad.focusEdge) {
+      this.toggleFocusFromPad();
+    }
+
+    if (pad.weaponDelta) this.cycleBank(WEAPON_KEYS, pad.weaponDelta);
+    if (pad.classSlot >= 0) this.castBound(CLASS_KEYS[pad.classSlot] ?? "KeyR");
+    if (pad.fireEdge) this.castCurrent();
+  }
+
+  private cycleBank(bank: readonly string[], delta: number) {
+    const idx = Math.max(
+      0,
+      bank.findIndex((k) => this.bindings[k] === this.activeSkillId),
+    );
+    const next = bank[(idx + delta + bank.length) % bank.length];
+    if (!next) return;
+    const id = this.bindings[next];
+    if (id) this.setActiveSkill(id);
+  }
+
+  private castBound(code: string) {
+    const id = this.bindings[code];
+    if (!id) return;
+    this.activeSkillId = id;
+    this.castSkill(id);
+  }
+
+  private lockFocusFromPad() {
+    const target = this.pickFocusTarget() ?? this.dummies[0] ?? null;
+    if (!target) return;
+    this.focused = true;
+    this.lockDummy = target;
+    this.focusOrbit = 0;
+    this.hint = "Focus · stick strafe";
+    this.emit();
+  }
+
+  private toggleFocusFromPad() {
+    if (this.focused) {
+      this.focused = false;
+      this.lockDummy = null;
+      this.focusOrbit = 0;
+      this.hint = "Focus off";
+      this.emit();
+      return;
+    }
+    this.lockFocusFromPad();
+  }
+
   private pickFocusTarget(): Dummy | null {
     this.raycaster.setFromCamera(this.pointer, this.camera);
     let best: Dummy | null = null;
@@ -2292,11 +2436,13 @@ export class LabEngine {
             ? 0.1
             : 0.07;
     this.cameraFeel.punch(amount + skill.impact * 0.018);
+    rumble(0.28 + skill.impact * 0.08, 0.1, 55);
   }
 
   private punchHit(skill: SkillDef) {
     this.cameraFeel.punch(0.05 + skill.impact * 0.016, 3.2, 22);
     this.hitStop = Math.max(this.hitStop, Math.min(0.05, 0.016 + skill.impact * 0.006));
+    rumble(0.4 + skill.impact * 0.12, 0.18, 90);
   }
 
   private syncColliderVis() {

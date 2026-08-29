@@ -76,6 +76,9 @@ const EMPTY: HudState = {
   clock: "12:00 PM",
   period: "Midday",
   timeScale: 0,
+  focusHold: false,
+  focused: false,
+  pad: "",
 };
 
 export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
@@ -171,6 +174,9 @@ export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
                 <b className="text-fg">LMB</b> fire · <b className="text-fg">RMB</b> focus
               </div>
               <div>
+                <b className="text-fg">Pad</b> LS move · RT fire · LT focus
+              </div>
+              <div>
                 <b className="text-fg">Tab</b> spell book · editor bind
               </div>
             </div>
@@ -257,6 +263,22 @@ export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
               >
                 Active
               </button>
+              <button
+                type="button"
+                className={`pointer-events-auto rounded-full border px-2.5 py-1 text-[11px] ${
+                  hud.focused
+                    ? "border-gold bg-surface text-gold"
+                    : "border-border hud-panel text-fg"
+                }`}
+                onClick={() => engineRef.current?.setFocusHold(!hud.focusHold)}
+              >
+                RMB {hud.focusHold ? "Hold" : "Toggle"}
+              </button>
+              {hud.pad ? (
+                <span className="pointer-events-none rounded-full border border-gold/50 bg-surface px-2.5 py-1 text-[11px] text-gold">
+                  Pad
+                </span>
+              ) : null}
             </div>
             <div className="hud-panel pointer-events-auto flex items-center gap-2 rounded-lg px-2.5 py-1.5">
               <span className="min-w-[4.6rem] text-[11px] tabular-nums text-gold">
@@ -328,6 +350,20 @@ export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
                   onClick={() => engineRef.current?.toggleColliders()}
                 >
                   Colliders
+                </button>
+                <button
+                  type="button"
+                  className={`rounded px-2 py-1 ${hud.focusHold ? "border border-border" : "bg-gold text-bg"}`}
+                  onClick={() => engineRef.current?.setFocusHold(false)}
+                >
+                  RMB Toggle
+                </button>
+                <button
+                  type="button"
+                  className={`rounded px-2 py-1 ${hud.focusHold ? "bg-gold text-bg" : "border border-border"}`}
+                  onClick={() => engineRef.current?.setFocusHold(true)}
+                >
+                  RMB Hold
                 </button>
                 <button
                   type="button"

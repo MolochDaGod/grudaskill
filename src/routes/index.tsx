@@ -43,6 +43,9 @@ function Home() {
             <b className="text-fg">LMB</b> fire · <b className="text-fg">RMB</b> focus
           </div>
           <div>
+            <b className="text-fg">Pad</b> LS move · RT fire · LT focus
+          </div>
+          <div>
             <b className="text-fg">Tab</b> spell book · editor bind
           </div>
         </div>

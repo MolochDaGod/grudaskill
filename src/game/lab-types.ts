@@ -51,6 +51,9 @@ export type HudState = {
   clock: string;
   period: string;
   timeScale: number;
+  focusHold: boolean;
+  focused: boolean;
+  pad: string;
 };
 
 /** Method surface the HUD talks to — kept free of three.js so SSR stays light. */
@@ -86,4 +89,5 @@ export type LabEngine = {
   setHour(hour: number): void;
   toggleCycle(): void;
   attachRapier(world: unknown): void;
+  setFocusHold(hold: boolean): void;
 };

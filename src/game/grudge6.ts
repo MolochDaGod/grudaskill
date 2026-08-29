@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import type { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type { ProjectileAsset } from "./skills";
+import { ASSETS_URL } from "./cdn";
 
 export const GRUDGE6_RACES = [
   { id: "human", name: "Human", prefix: "WK_" },
@@ -13,7 +14,7 @@ export const GRUDGE6_RACES = [
 
 export type Grudge6Id = (typeof GRUDGE6_RACES)[number]["id"];
 
-const CDN = "https://assets.grudge-studio.com";
+const CDN = ASSETS_URL;
 export function raceGlbUrl(id: string): string {
   return `${CDN}/asset-packs/toon-rts-characters/glb/characters/${id}.glb`;
 }
