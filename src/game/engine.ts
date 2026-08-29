@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { makeGltfLoader } from "./gltf-pipeline";
 import {
   type SkillDef,
   type ProjectileAsset,
@@ -8,24 +8,29 @@ import {
   AIM_MODES,
   loadSkills,
   saveSkillState,
+  parseLabSave,
+  installSaveFlush,
   skillById,
   keyLabel,
   defaultCustomSkill,
   isPlayKey,
   isWeaponKey,
+  isPolymorph,
   WEAPON_KEYS,
   CLASS_KEYS,
   isFarAoe,
+  castGate,
 } from "./skills";
 import { loadFleet, MODEL_URLS, SKILL_VFX, type VfxEntry } from "./fleet";
 import { SparkPool } from "./sparks";
-import { SpriteActor, WARLORD_KITS, DUMMY_KITS } from "./sprite-actor";
 import {
   GRUDGE6_RACES,
   raceGlbUrl,
   dressToon,
   preparePlayKit,
   loadBip001Packs,
+  parseCachedGlb,
+  disposeGpuTree,
   tickMixer,
   findEquippedWeapon,
   weaponMuzzleWorld,
@@ -52,8 +57,13 @@ import { pollPad, rumble, type PadFrame } from "./pad";
 import type { KitMode } from "./lab-types";
 import type { HudState } from "./lab-types";
 export type { HudState, KitMode } from "./lab-types";
+import { GpuWatch, type GpuSnap } from "./gpu-watch";
+import { emptyDiag, errText, labLog, labLogs, type LabDiag } from "./debug";
+import { wasmHeapBytes } from "./rapier-boot";
 import { WeatherSystem, type WeatherId } from "./weather";
+
 import { GrassField } from "./grass";
+import { makeDummyRig, makeFrogPet, parseDummyGltf, playDummyHit, tickDummyRig, TRAINING_DUMMY_URL, FROG_PET_URL, type DummyRig } from "./training-dummy";
 
 declare global {
   interface Window {
@@ -73,10 +83,14 @@ type Dummy = {
   frozen: number;
   vel: THREE.Vector3;
   collider: THREE.Mesh;
-  actor?: SpriteActor;
+  body: THREE.Mesh;
+  dummy?: DummyRig;
+  frog?: THREE.Object3D;
+  polyT: number;
   toon?: ToonRig;
   home: THREE.Vector3;
   wander: { radius: number; speed: number; offset: number; wobble: number; cx: number; cz: number };
+  walkSpeed: number;
 };
 
 type Shot = {
@@ -133,6 +147,7 @@ const _v3 = new THREE.Vector3();
 const _muzzleFwd = new THREE.Vector3();
 const FALLBACK_FORWARD = new THREE.Vector3(0, 0, -1);
 const FOCUS_HOLD_KEY = "grudge-lab-focus-hold";
+const CAM_KEY = "grudge-lab-cam";
 
 function readFocusHold() {
   try {
@@ -142,19 +157,64 @@ function readFocusHold() {
   }
 }
 
+function readCamOpts(): { style?: "tight" | "normal" | "wide"; invertY?: boolean; crosshair?: boolean } {
+  try {
+    return JSON.parse(localStorage.getItem(CAM_KEY) || "{}") as {
+      style?: "tight" | "normal" | "wide";
+      invertY?: boolean;
+      crosshair?: boolean;
+    };
+  } catch {
+    return {};
+  }
+}
+
 function hexToInt(hex: string): number {
   const n = Number.parseInt(hex.replace("#", ""), 16);
   return Number.isFinite(n) ? n : 0xff6a2a;
 }
 
+function makeCrosshairTex() {
+  const c = document.createElement("canvas");
+  c.width = 64;
+  c.height = 64;
+  const g = c.getContext("2d")!;
+  g.clearRect(0, 0, 64, 64);
+  g.strokeStyle = "#e8c36a";
+  g.lineWidth = 3;
+  g.beginPath();
+  g.arc(32, 32, 18, 0, Math.PI * 2);
+  g.stroke();
+  g.beginPath();
+  g.moveTo(32, 6);
+  g.lineTo(32, 20);
+  g.moveTo(32, 44);
+  g.lineTo(32, 58);
+  g.moveTo(6, 32);
+  g.lineTo(20, 32);
+  g.moveTo(44, 32);
+  g.lineTo(58, 32);
+  g.stroke();
+  g.fillStyle = "#e8c36a";
+  g.beginPath();
+  g.arc(32, 32, 2.4, 0, Math.PI * 2);
+  g.fill();
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.needsUpdate = true;
+  return t;
+}
+
 function makeMat(color: number, opts: Partial<THREE.MeshStandardMaterialParameters> = {}) {
+  return new THREE.MeshStandardMaterial({ color, metalness: 0.35, roughness: 0.45, ...opts });
+}
   return new THREE.MeshStandardMaterial({ color, metalness: 0.35, roughness: 0.45, ...opts });
 }
 
 export class LabEngine {
   private renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
-  private camera = new THREE.PerspectiveCamera(55, 1, 0.1, 1800);
+  private camera = new THREE.PerspectiveCamera(55, 1, 0.1, 5000);
   private clock = new THREE.Timer();
   private raycaster = new THREE.Raycaster();
   private pointer = new THREE.Vector2();
@@ -170,6 +230,12 @@ export class LabEngine {
   private orbiting = false;
   private focused = false;
   private focusHold = false;
+  private camStyle: "tight" | "normal" | "wide" = "normal";
+  private invertY = false;
+  private crosshairOn = true;
+  private softDummy: Dummy | null = null;
+  private markX = -1;
+  private markY = -1;
   private focusOrbit = 0;
   private lastX = 0;
   private lastY = 0;
@@ -208,14 +274,32 @@ export class LabEngine {
   private frames = 0;
   private fps = 60;
   private fpsAcc = 0;
+  private gpuOn = false;
+  private gpuWatch = new GpuWatch();
+  private gpu: GpuSnap = {
+    calls: 0,
+    tris: 0,
+    geos: 0,
+    tex: 0,
+    programs: 0,
+    dpr: 1,
+    leak: "ok",
+    dGeo: 0,
+    dTex: 0,
+    wasmMb: 0,
+    api: "webgl2",
+  };
+  private diag: LabDiag = emptyDiag();
   private onHud: (s: HudState) => void;
   private canvas: HTMLCanvasElement;
   private touchMove = { x: 0, y: 0 };
   private pad: PadFrame | null = null;
   private sparks = new SparkPool();
-  private heroActor: SpriteActor | null = null;
   private kitId = "human";
+  private pendingWeather: { weather?: string; hour?: number } = {};
+  private unsave: (() => void) | null = null;
   private toon: ToonRig | null = null;
+  private frogProto: THREE.Object3D | null = null;
   private weaponMesh: THREE.Object3D | null = null;
   private weaponUuid = "";
   private arrowProto: THREE.Object3D | null = null;
@@ -226,20 +310,20 @@ export class LabEngine {
   private grass!: GrassField;
   private activeMode = false;
   private simTime = 0;
-  private weather!: WeatherSystem;
   private hitStop = 0;
   private moveFwd = new THREE.Vector3();
   private moveRight = new THREE.Vector3();
   private playerCollider: THREE.Mesh | null = null;
   private fleetLabel = "linking D1 / VFX…";
   private effects: VfxEntry[] = [];
-  private loader = new GLTFLoader();
+  private loader = makeGltfLoader();
   private pendingOverlay: "attack" | "cast" | null = null;
   private animPacks: Record<string, THREE.AnimationClip> | null = null;
   private gravity = new THREE.Vector3(0, -18, 0);
   private collidersOn = false;
   private armor = "A";
   private reticle!: THREE.Mesh;
+  private focusSprite!: THREE.Sprite;
   private aoeGhost!: THREE.Group;
   private rangeGroup = new THREE.Group();
   private physics = new LabPhysics();
@@ -248,6 +332,9 @@ export class LabEngine {
   private handNow = new THREE.Vector3(0, 1.2, 0);
   private handPrev = new THREE.Vector3(0, 1.2, 0);
   private pendingSlash: { skill: SkillDef; t: number } | null = null;
+  private armed: { id: string; gate: "draw" | "place" } | null = null;
+  private drawLine!: THREE.Line;
+  private drawPts = new Float32Array(6);
   private ownLoop = true;
   private ext: {
     element: string;
@@ -349,38 +436,56 @@ export class LabEngine {
     this.canvas = canvas;
     this.onHud = onHud;
     this.ownLoop = attach?.ownLoop ?? true;
+    THREE.ColorManagement.enabled = true;
+    THREE.Cache.enabled = true;
+    try {
+      this.gpuOn = localStorage.getItem("lab.debug") === "1";
+    } catch {
+      /* ignore */
+    }
     if (attach?.scene) this.scene = attach.scene;
     if (attach?.camera && (attach.camera as THREE.PerspectiveCamera).isPerspectiveCamera) {
       this.camera = attach.camera as THREE.PerspectiveCamera;
       this.camera.near = 0.1;
-      this.camera.far = 1800;
+      this.camera.far = 5000;
       this.camera.updateProjectionMatrix();
     }
     this.renderer =
       attach?.gl ??
       new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance" });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
-    this.renderer.setClearColor(0x05070a, 1);
-    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.toneMapping = THREE.NoToneMapping;
-    this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    if (!attach?.gl) {
+      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+      this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+      this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      this.renderer.shadowMap.enabled = true;
+      this.renderer.shadowMap.type = THREE.PCFShadowMap;
+    }
+    this.canvas.addEventListener("webglcontextlost", this.onContextLost);
+    this.canvas.addEventListener("webglcontextrestored", this.onContextRestored);
     const loaded = loadSkills();
     this.catalog = loaded.catalog;
+    this.loader = makeGltfLoader();
     this.custom = loaded.custom;
     this.bindings = loaded.bindings;
+    if (loaded.settings.focusHold != null) this.focusHold = loaded.settings.focusHold;
+    if (loaded.settings.armor) this.armor = loaded.settings.armor;
+    if (loaded.settings.kitId) this.kitId = loaded.settings.kitId;
+    this.pendingWeather = { weather: loaded.settings.weather, hour: loaded.settings.hour };
     this.buildWorld();
     this.buildWarlord();
     this.buildDummies();
     this.allocPools();
-    this.slashes = createSlashPool(10, this.scene);
+    this.slashes = createSlashPool(6, this.scene);
     this.rituals = new RitualDirector(this.scene, this.sparks, this.player);
     this.camera.layers.enable(0);
     this.camera.layers.enable(1);
     this.camera.layers.enable(3);
     this.hint = "1–6 weapon · R F V T G B class · LMB fire · RMB focus";
-    this.focusHold = readFocusHold();
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.focusHold = loaded.settings.focusHold ?? readFocusHold();
+    const cam = readCamOpts();
+    if (cam.style) this.camStyle = cam.style;
+    if (cam.invertY != null) this.invertY = cam.invertY;
+    if (cam.crosshair != null) this.crosshairOn = cam.crosshair;
     this.scene.add(this.sparks.points);
     this.bind();
     this.resize();
@@ -425,15 +530,78 @@ export class LabEngine {
   attachRapier(world: unknown) {
     this.physics.attachWorld(world as never);
     this.rebuildPhysicsBodies();
+    this.diag.physics = !!world;
   }
 
   tick(dt: number) {
     if (this.disposed) return;
-    this.stepFrame(dt);
+    try {
+      this.stepFrame(dt);
+    } catch (err) {
+      this.diag.tickErr += 1;
+      this.diag.lastErr = errText(err);
+      labLog(`tick ${this.diag.lastErr}`);
+      if (this.diag.tickErr <= 3) this.emit();
+    }
   }
 
-  private persist() {
-    saveSkillState({ custom: this.custom, bindings: this.bindings, catalog: this.catalog });
+  private copyDebug() {
+    const snap = {
+      kit: this.kitId,
+      skill: this.activeSkillId,
+      fps: this.fps,
+      gpu: this.gpu,
+      debug: this.diag,
+      log: labLogs(),
+      hint: this.hint,
+    };
+    const text = JSON.stringify(snap, null, 2);
+    void navigator.clipboard?.writeText(text).then(
+      () => {
+        this.hint = "Debug snapshot copied";
+        this.emit();
+      },
+      () => {
+        this.hint = "Copy failed";
+        this.emit();
+      },
+    );
+  }
+
+  private onContextLost = (e: Event) => {
+    e.preventDefault();
+    this.diag.gl = "lost";
+    this.diag.lastErr = "WebGL context lost";
+    labLog("webgl lost");
+    this.hint = "WebGL lost — click the arena to restore";
+    this.emit();
+  };
+
+  private onContextRestored = () => {
+    this.diag.gl = "restored";
+    labLog("webgl restored");
+    this.hint = "WebGL restored";
+    this.gpuWatch.reset();
+    this.emit();
+  };
+
+  private persist(immediate = false) {
+    saveSkillState(
+      {
+        custom: this.custom,
+        bindings: this.bindings,
+        catalog: this.catalog,
+        settings: {
+          focusHold: this.focusHold,
+          weather: this.weatherSys?.id,
+          hour: this.weatherSys?.hour,
+          kitId: this.kitId,
+          armor: this.armor,
+          activeMode: this.activeMode,
+        },
+      },
+      immediate,
+    );
   }
 
   setCustom(patch: Partial<SkillDef>) {
@@ -556,22 +724,22 @@ export class LabEngine {
     if (bend) {
       this.kitMode = "bending";
       this.bendElement = bend;
-      if (!this.bending) void this.ensureKits().then(() => this.applyKitForSkill(id));
+      if (!this.bending) void this.ensureKits().then(() => this.applyKitForSkill(id)).catch(() => {});
       else this.bending.select(bend);
     } else if (lin) {
       this.kitMode = "linear";
       this.element = lin;
-      if (!this.linear) void this.ensureKits().then(() => this.applyKitForSkill(id));
+      if (!this.linear) void this.ensureKits().then(() => this.applyKitForSkill(id)).catch(() => {});
       else this.linear.armAbility(lin);
     } else if (sam) {
       this.kitMode = "samurai";
       this.element = sam;
-      if (!this.samurai) void this.ensureKits().then(() => this.applyKitForSkill(id));
+      if (!this.samurai) void this.ensureKits().then(() => this.applyKitForSkill(id)).catch(() => {});
     } else if (ext || skill.kind === "ritual" || skill.kind === "portal") {
       this.kitMode = "sandbox";
       if (ext) {
         this.element = ext;
-        if (!this.ext) void this.ensureKits().then(() => this.applyKitForSkill(id));
+        if (!this.ext) void this.ensureKits().then(() => this.applyKitForSkill(id)).catch(() => {});
         else this.ext.armAbility(ext);
       }
     } else {
@@ -685,24 +853,28 @@ export class LabEngine {
       dressToon(this.toon.root, skill.asset, this.toon.raceId, this.armor);
       this.showWeapon(skill.asset);
     }
+    this.persist();
     this.emit();
   }
 
   setWeather(id: WeatherId) {
     this.weatherSys.set(id);
     this.hint = `${id[0]!.toUpperCase()}${id.slice(1)} sky`;
+    this.persist();
     this.emit();
   }
 
   toggleActiveMode() {
     this.activeMode = !this.activeMode;
     this.hint = this.activeMode ? "Active · AI wandering" : "Range · dummies hold";
+    this.persist();
     this.emit();
   }
 
   setHour(hour: number) {
     this.weatherSys.setHour(hour);
     this.hint = `${this.weatherSys.clock} · ${this.weatherSys.period}`;
+    this.persist();
     this.emit();
   }
 
@@ -720,7 +892,39 @@ export class LabEngine {
       /* ignore */
     }
     this.hint = hold ? "RMB focus · hold" : "RMB focus · toggle";
+    this.persist();
     this.emit();
+  }
+
+  setCamStyle(style: "tight" | "normal" | "wide") {
+    this.camStyle = style;
+    this.saveCamOpts();
+    this.hint = `Camera · ${style}`;
+    this.emit();
+  }
+
+  setInvertY(on: boolean) {
+    this.invertY = on;
+    this.saveCamOpts();
+    this.hint = on ? "Look invert on" : "Look invert off";
+    this.emit();
+  }
+
+  setCrosshair(on: boolean) {
+    this.crosshairOn = on;
+    this.saveCamOpts();
+    this.emit();
+  }
+
+  private saveCamOpts() {
+    try {
+      localStorage.setItem(
+        CAM_KEY,
+        JSON.stringify({ style: this.camStyle, invertY: this.invertY, crosshair: this.crosshairOn }),
+      );
+    } catch {
+      /* ignore */
+    }
   }
 
   resetDummies() {
@@ -788,6 +992,7 @@ export class LabEngine {
     const url = URL.createObjectURL(file);
     try {
       const gltf = await this.loader.loadAsync(url);
+      if (this.customProto) disposeGpuTree(this.customProto);
       this.customProto = gltf.scene;
       this.custom = { ...this.custom, name: file.name.replace(/\.[^.]+$/, "") };
       this.persist();
@@ -801,29 +1006,57 @@ export class LabEngine {
 
   exportSkillJson(): string {
     return JSON.stringify(
-      { skill: this.custom, vfx: SKILL_VFX[this.custom.id] ?? SKILL_VFX.custom, v: 2 },
+      {
+        v: 6,
+        skill: this.custom,
+        custom: this.custom,
+        bindings: this.bindings,
+        catalog: this.catalog,
+        settings: {
+          focusHold: this.focusHold,
+          weather: this.weatherSys?.id,
+          hour: this.weatherSys?.hour,
+          kitId: this.kitId,
+          armor: this.armor,
+          activeMode: this.activeMode,
+        },
+        vfx: SKILL_VFX[this.custom.id] ?? SKILL_VFX.custom,
+      },
       null,
       2,
     );
   }
 
-  async setWarlordKit(id: string) {
-    if (GRUDGE6_RACES.some((r) => r.id === id)) {
-      await this.loadRace(id);
+  importLabSave(raw: string) {
+    const parsed = parseLabSave(raw);
+    if (!parsed) {
+      this.hint = "Save file unreadable";
+      this.emit();
       return;
     }
-    const def = WARLORD_KITS.find((k) => k.id === id) ?? WARLORD_KITS[0];
-    if (!def) return;
-    this.kitId = def.id;
-    this.clearToon();
-    if (this.heroActor) this.player.remove(this.heroActor.group);
-    const actor = new SpriteActor(def);
-    this.heroActor = actor;
-    this.player.add(actor.group);
-    this.kit.visible = false;
-    await actor.load();
-    this.hint = `Pixel kit: ${def.name}`;
+    if (parsed.custom?.id) {
+      this.custom = { ...this.custom, ...parsed.custom, id: "custom" };
+      const i = this.catalog.findIndex((s) => s.id === "custom");
+      if (i >= 0) this.catalog[i] = this.custom;
+    }
+    if (parsed.bindings) this.bindings = { ...this.bindings, ...parsed.bindings };
+    if (parsed.patches) {
+      for (const s of this.catalog) {
+        const p = parsed.patches[s.id];
+        if (p) Object.assign(s, p, { id: s.id });
+      }
+    }
+    if (parsed.settings?.armor) this.setArmor(parsed.settings.armor);
+    if (parsed.settings?.weather) this.setWeather(parsed.settings.weather as WeatherId);
+    if (parsed.settings?.hour != null) this.setHour(parsed.settings.hour);
+    if (parsed.settings?.focusHold != null) this.setFocusHold(parsed.settings.focusHold);
+    this.persist(true);
+    this.hint = `Loaded ${this.custom.name}`;
     this.emit();
+  }
+
+  async setWarlordKit(id: string) {
+    await this.loadRace(id);
   }
 
   dispose() {
@@ -831,16 +1064,29 @@ export class LabEngine {
     cancelAnimationFrame(this.raf);
     this.clock.disconnect();
     this.unbind();
+    this.canvas.removeEventListener("webglcontextlost", this.onContextLost);
+    this.canvas.removeEventListener("webglcontextrestored", this.onContextRestored);
     if (window.__controlsTest) delete window.__controlsTest;
-    if (this.ownLoop) this.renderer.dispose();
+    if (this.ownLoop) {
+      try {
+        this.renderer.dispose();
+      } catch {
+        /* context already gone */
+      }
+    }
     this.grass?.dispose();
     this.weatherSys?.dispose();
+    this.physics.dispose();
+    if (this.toon) disposeGpuTree(this.toon.root);
+    for (const d of this.dummies) disposeGpuTree(d.group);
+    this.gpuWatch.reset();
   }
 
   private clearToon() {
     if (this.toon) {
       this.toon.mixer?.stopAllAction();
       this.player.remove(this.toon.root);
+      disposeGpuTree(this.toon.root);
       this.toon = null;
       this.weaponMesh = null;
       this.weaponUuid = "";
@@ -850,13 +1096,9 @@ export class LabEngine {
   private async loadRace(id: string) {
     this.kitId = id;
     this.kit.visible = false;
-    if (this.heroActor) {
-      this.player.remove(this.heroActor.group);
-      this.heroActor = null;
-    }
     this.clearToon();
     try {
-      const gltf = await this.loader.loadAsync(raceGlbUrl(id));
+      const gltf = await parseCachedGlb(this.loader, raceGlbUrl(id));
       const skill = skillById(this.catalog, this.custom, this.activeSkillId);
       const clips = this.animPacks ?? (await loadBip001Packs(this.loader));
       this.animPacks = clips;
@@ -876,9 +1118,16 @@ export class LabEngine {
       this.samurai?.syncDummies(this.dummies);
       const name = GRUDGE6_RACES.find((r) => r.id === id)?.name ?? id;
       this.hint = `Grudge6 Toon RTS · ${name}`;
-    } catch {
-      this.hint = `Grudge6 ${id} failed — pixel fallback`;
-      await this.setWarlordKit("barbarian-warrior");
+      this.diag.kit = id;
+      this.diag.clips = Object.keys(clips).length;
+      this.diag.lastErr = "";
+      labLog(`kit ${id} clips ${this.diag.clips}`);
+    } catch (err) {
+      this.diag.lastErr = errText(err);
+      labLog(`kit ${id} ${this.diag.lastErr}`);
+      this.kit.visible = true;
+      this.hint = `Grudge6 ${id} failed — 3D stand-in`;
+      this.emit();
       return;
     }
     this.emit();
@@ -887,12 +1136,14 @@ export class LabEngine {
   private async bootFleet() {
     try {
       this.animPacks = await loadBip001Packs(this.loader);
+      this.diag.clips = Object.keys(this.animPacks).length;
+      labLog(`anims ${this.diag.clips}`);
       const snap = await loadFleet();
       this.effects = snap.effects;
-      this.fleetLabel = `D1 ${Object.keys(snap.d1).length} spells · ${snap.effects.length} VFX · grudge6`;
+      this.fleetLabel = `D1 ${Object.keys(snap.d1).length} spells · ${snap.effects.length} VFX`;
       this.emit();
       await this.loadWarlords();
-      if (!this.physics.world) await this.physics.init();
+      await this.dressDummies();
       this.rebuildPhysicsBodies();
     } catch {
       this.fleetLabel = "fleet offline";
@@ -903,44 +1154,38 @@ export class LabEngine {
   private async loadWarlords() {
     this.kit.visible = false;
     await this.loadRace(this.kitId);
+    this.emit();
     try {
-      const arrow = await this.loader.loadAsync(MODEL_URLS.arrow);
+      const arrow = await parseCachedGlb(this.loader, MODEL_URLS.arrow);
       this.arrowProto = makeForwardMesh(arrow.scene, 1.1);
     } catch {
       /* skip */
     }
-    const dummyRaces = GRUDGE6_RACES.filter((r) => r.id !== this.kitId);
-    await Promise.all(
-      this.dummies.map(async (d, i) => {
-        const race = dummyRaces[i % dummyRaces.length];
-        if (!race) return;
-        try {
-          const gltf = await this.loader.loadAsync(raceGlbUrl(race.id));
-          const clips = this.animPacks ?? (await loadBip001Packs(this.loader));
-          this.animPacks = clips;
-          const rig = preparePlayKit(gltf.scene, {
-            raceId: race.id,
-            asset: "spear",
-            armor: "A",
-            clips,
-            targetH: 1.75,
-          });
-          d.group.clear();
-          d.group.add(rig.root);
-          d.toon = rig;
-          d.collider = this.makeColliderMesh();
-          d.group.add(d.collider);
-        } catch {
-          const def = DUMMY_KITS[i % DUMMY_KITS.length];
-          if (!def) return;
-          const actor = new SpriteActor(def);
-          d.actor = actor;
-          d.group.clear();
-          d.group.add(actor.group);
-          await actor.load();
-        }
-      }),
-    );
+    this.emit();
+  }
+
+  private async dressDummies() {
+    try {
+      const gltf = await parseCachedGlb(this.loader, TRAINING_DUMMY_URL);
+      const { proto, clips } = parseDummyGltf(gltf);
+      for (const d of this.dummies) {
+        if (d.dummy) d.group.remove(d.dummy.root);
+        const rig = makeDummyRig(proto, clips);
+        d.dummy = rig;
+        d.body.visible = false;
+        d.group.add(rig.root);
+      }
+      this.hint = "Training dummies live · hit them";
+    } catch (err) {
+      labLog(`dummy ${errText(err)}`);
+      this.hint = "Dummy GLB missed — cylinders stay";
+    }
+    try {
+      const frogGltf = await parseCachedGlb(this.loader, FROG_PET_URL);
+      this.frogProto = frogGltf.scene;
+    } catch (err) {
+      labLog(`frog ${errText(err)}`);
+    }
     this.emit();
   }
 
@@ -951,6 +1196,17 @@ export class LabEngine {
     root.scale.multiplyScalar(targetH / h);
     const box2 = new THREE.Box3().setFromObject(root);
     root.position.y -= box2.min.y;
+  }
+
+  private sampleGpu() {
+    const anyGl = this.renderer as THREE.WebGLRenderer & { isWebGPURenderer?: boolean; capabilities?: { isWebGL2?: boolean } };
+    const api = anyGl.isWebGPURenderer ? "webgpu" : anyGl.capabilities?.isWebGL2 ? "webgl2" : "webgl";
+    this.gpu = this.gpuWatch.sample(
+      this.renderer.info,
+      Math.round(this.renderer.getPixelRatio() * 100) / 100,
+      wasmHeapBytes(),
+      api,
+    );
   }
 
   private emit() {
@@ -970,13 +1226,13 @@ export class LabEngine {
       buffs: this.buffs,
       aim: this.aim,
       fleet: this.fleetLabel,
-      effects: this.effects.slice(0, 40).map((e) => ({ id: e.id, name: e.name })),
+      effects: (this.effects ?? []).slice(0, 40).map((e) => ({ id: e.id, name: e.name })),
       kitId: this.kitId,
-      kits: GRUDGE6_RACES.map((k) => ({ id: k.id, name: k.name })),
+      kits: (GRUDGE6_RACES ?? []).map((k) => ({ id: k.id, name: k.name })),
       bookOpen: this.bookOpen,
       listening: this.listening,
       bindings: this.bindings,
-      book: this.catalog.map((s) => ({
+      book: (this.catalog ?? []).map((s) => ({
         id: s.id,
         name: s.name,
         kind: s.kind,
@@ -1006,7 +1262,24 @@ export class LabEngine {
       timeScale: this.weatherSys.timeScale,
       focusHold: this.focusHold,
       focused: this.focused,
+      camStyle: this.camStyle,
+      invertY: this.invertY,
+      crosshair: this.crosshairOn,
+      markX: this.markX,
+      markY: this.markY,
+      markHard: !!(this.focused && this.lockDummy),
       pad: this.pad?.connected ? this.pad.id : "",
+      gpuOn: this.gpuOn,
+      gpu: this.gpu,
+      debug: {
+        gl: this.diag.gl,
+        tickErr: this.diag.tickErr,
+        lastErr: this.diag.lastErr,
+        kit: this.diag.kit || this.kitId,
+        clips: this.diag.clips,
+        physics: this.diag.physics,
+        log: labLogs(),
+      },
       tunes:
         this.snapshotTunes && this.kitMode !== "shot"
           ? this.snapshotTunes(this.kitMode, this.kitMode === "bending" ? this.bendElement : this.element)
@@ -1016,6 +1289,14 @@ export class LabEngine {
 
   private buildWorld() {
     this.weatherSys = new WeatherSystem(this.scene, this.renderer);
+    if (this.pendingWeather.weather) {
+      try {
+        this.weatherSys.set(this.pendingWeather.weather as WeatherId);
+      } catch {
+        /* default sunny */
+      }
+    }
+    if (this.pendingWeather.hour != null) this.weatherSys.setHour(this.pendingWeather.hour);
     const ground = new THREE.Mesh(
       new THREE.CircleGeometry(22, 48),
       new THREE.MeshStandardMaterial({ color: 0x5a4630, roughness: 0.94 }),
@@ -1081,6 +1362,11 @@ export class LabEngine {
     );
     this.reticle.rotation.x = -Math.PI / 2;
     this.scene.add(this.reticle);
+    this.focusSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: makeCrosshairTex(), depthTest: false, transparent: true, sizeAttenuation: true }));
+    this.focusSprite.scale.set(0.42, 0.42, 1);
+    this.focusSprite.visible = false;
+    this.focusSprite.renderOrder = 10;
+    this.scene.add(this.focusSprite);
     this.scene.add(this.sparks.points);
   }
 
@@ -1132,7 +1418,10 @@ export class LabEngine {
         frozen: 0,
         vel: new THREE.Vector3(),
         collider: col,
+        body,
+        polyT: 0,
         home: new THREE.Vector3(g.position.x, 0, g.position.z),
+        walkSpeed: 0,
         wander: {
           radius: 3.2 + i * 0.7,
           speed: 0.35 + i * 0.08,
@@ -1156,7 +1445,7 @@ export class LabEngine {
   }
 
   private allocPools() {
-    for (let i = 0; i < 32; i++) {
+    for (let i = 0; i < 12; i++) {
       const mesh = this.makeProjectileMesh({ asset: "arrow", color: "#d7c4a3", length: 1.2, size: 0.16 } as SkillDef);
       mesh.visible = false;
       this.scene.add(mesh);
@@ -1315,6 +1604,7 @@ export class LabEngine {
     this.canvas.addEventListener("pointermove", this.onPointerMove);
     this.canvas.addEventListener("wheel", this.onWheel, { passive: false });
     this.canvas.addEventListener("contextmenu", this.onCtx);
+    this.unsave = installSaveFlush(() => this.persist(true));
   }
   private unbind() {
     window.removeEventListener("resize", this.onResize);
@@ -1326,6 +1616,9 @@ export class LabEngine {
     this.canvas.removeEventListener("pointermove", this.onPointerMove);
     this.canvas.removeEventListener("wheel", this.onWheel);
     this.canvas.removeEventListener("contextmenu", this.onCtx);
+    this.unsave?.();
+    this.unsave = null;
+    this.persist(true);
   }
 
   private onResize = () => this.resize();
@@ -1360,6 +1653,23 @@ export class LabEngine {
     if (e.code === "Tab") {
       e.preventDefault();
       this.toggleBook();
+      return;
+    }
+    if (e.code === "F3") {
+      e.preventDefault();
+      if (e.shiftKey) {
+        this.copyDebug();
+        return;
+      }
+      this.gpuOn = !this.gpuOn;
+      try {
+        localStorage.setItem("lab.debug", this.gpuOn ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      this.sampleGpu();
+      this.hint = this.gpuOn ? "Debug on · F3 · Shift+F3 copy" : "Debug off";
+      this.emit();
       return;
     }
     if (e.code === "KeyH") {
@@ -1453,14 +1763,14 @@ export class LabEngine {
       this.lastX = e.clientX;
       this.lastY = e.clientY;
       this.focusOrbit = THREE.MathUtils.clamp(this.focusOrbit - dx * 0.004, -0.7, 0.7);
-      this.camPitch = THREE.MathUtils.clamp(this.camPitch + dy * 0.003, 0.12, 1.05);
+      this.camPitch = THREE.MathUtils.clamp(this.camPitch + dy * (this.invertY ? -0.003 : 0.003), 0.12, 1.05);
       return;
     }
     if (this.orbiting) {
       this.lastX = e.clientX;
       this.lastY = e.clientY;
       this.camYaw -= dx * 0.005;
-      this.camPitch = THREE.MathUtils.clamp(this.camPitch + dy * 0.004, 0.12, 1.15);
+      this.camPitch = THREE.MathUtils.clamp(this.camPitch + dy * (this.invertY ? -0.004 : 0.004), 0.12, 1.15);
     }
   };
   private updatePointer(e: PointerEvent) {
@@ -1497,14 +1807,6 @@ export class LabEngine {
       out.set(0, 0, 0).applyMatrix4(this.toon.rHand.matrixWorld);
       out.addScaledVector(_muzzleFwd, 0.42);
       if (!Number.isFinite(out.y) || out.y < 0.35) out.y = 1.15;
-      return out;
-    }
-    if (this.heroActor) {
-      out.set(
-        this.player.position.x + _muzzleFwd.x * 0.55,
-        1.15,
-        this.player.position.z + _muzzleFwd.z * 0.55,
-      );
       return out;
     }
     this.weaponHold.updateWorldMatrix(true, false);
@@ -1811,6 +2113,7 @@ export class LabEngine {
       this.fps = Math.round(this.frames / this.fpsAcc);
       this.frames = 0;
       this.fpsAcc = 0;
+      this.sampleGpu();
       this.emit();
     }
     this.pollGamepad(dt);
@@ -1818,10 +2121,12 @@ export class LabEngine {
     if (this.hitStop > 0) {
       this.hitStop = Math.max(0, this.hitStop - dt);
       this.drawCamera(dt);
+      this.updateSoftMark();
       return;
     }
     if (!this.paused) this.update(dt);
     this.drawCamera(dt);
+    this.updateSoftMark();
   }
 
   private update(dt: number) {
@@ -1859,7 +2164,6 @@ export class LabEngine {
     this.updateAoeGhost();
     this.physics.step(dt);
     this.sparks.update(dt);
-    this.reticle.visible = false;
     this.mana = Math.min(100, this.mana + dt * 8);
     if (this.buffT > 0) {
       this.buffT -= dt;
@@ -1876,9 +2180,16 @@ export class LabEngine {
     if (this.focused && this.lockDummy) {
       this.aimPoint.copy(this.lockDummy.group.position);
       this.aimPoint.y = 1.25;
+      this.softDummy = this.lockDummy;
       return;
     }
     this.raycaster.setFromCamera(this.pointer, this.camera);
+    this.softDummy = this.pickFocusTarget();
+    if (this.softDummy) {
+      this.aimPoint.copy(this.softDummy.group.position);
+      this.aimPoint.y = 1.25;
+      return;
+    }
     const planeHit = this.raycaster.ray.intersectPlane(this.groundPlane, _v);
     if (this.aim === "lock") {
       let best = Infinity;
@@ -1975,20 +2286,16 @@ export class LabEngine {
       const overlay = this.pendingOverlay;
       this.pendingOverlay = null;
       tickMixer(this.toon, dt, this.speed, overlay);
-    } else if (this.heroActor) {
-      const moving = this.speed > 0.4;
-      if (this.fireT > 0) {
-        this.fireT -= dt;
-        this.heroActor.setAnim("attack");
-      } else this.heroActor.setAnim(moving ? "walk" : "idle");
-      this.heroActor.setFlip(this.aimPoint.x >= this.player.position.x ? 1 : -1);
-      this.heroActor.update(dt);
+      plantFeet(this.toon.root, dt, 0, 0.03);
     } else {
       if (this.fireT > 0) this.fireT -= dt;
     }
     for (const d of this.dummies) {
-      d.actor?.update(dt);
-      if (d.toon) tickMixer(d.toon, dt, 0, null);
+      if (d.toon) {
+        const spd = this.activeMode && d.frozen <= 0 ? Math.max(d.walkSpeed, 1.2) : 0;
+        tickMixer(d.toon, dt, spd, null);
+        plantFeet(d.toon.root, dt, 0, 0.03);
+      }
     }
   }
 
@@ -2163,6 +2470,7 @@ export class LabEngine {
       if (d.frozen > 0) {
         d.frozen -= dt;
         d.vel.multiplyScalar(0.2);
+        d.walkSpeed = 0;
       } else if (this.activeMode) {
         const w = d.wander;
         const angle = this.simTime * w.speed + w.offset;
@@ -2177,7 +2485,10 @@ export class LabEngine {
         const dz = nz - d.group.position.z;
         d.group.position.x += dx * Math.min(1, dt * 2.2);
         d.group.position.z += dz * Math.min(1, dt * 2.2);
+        d.walkSpeed = Math.hypot(dx, dz) / Math.max(dt, 0.016);
         if (dx * dx + dz * dz > 1e-4) d.group.rotation.y = Math.atan2(dx, dz);
+      } else {
+        d.walkSpeed = 0;
       }
       d.group.position.addScaledVector(d.vel, dt);
       d.vel.multiplyScalar(0.9);
@@ -2185,6 +2496,11 @@ export class LabEngine {
         const dx = this.player.position.x - d.group.position.x;
         const dz = this.player.position.z - d.group.position.z;
         d.group.rotation.y = Math.atan2(dx, dz);
+      }
+      if (d.dummy) tickDummyRig(d.dummy, dt);
+      if (d.polyT > 0) {
+        d.polyT -= dt;
+        if (d.polyT <= 0) this.clearPolymorph(d);
       }
       if (d.collider) d.collider.visible = this.collidersOn;
       this.physics.moveDummy(i, d.group.position.x, d.group.position.z);
@@ -2269,10 +2585,10 @@ export class LabEngine {
     }
     this.sparks.burst(launched.pos, skill.color, 22, 6, 1.1);
     this.punchCast(skill);
-    this.hint = n > 1 ? `${skill.name} · ${n} flying cuts` : `${skill.name} screaming slash`;
+    this.hint = n > 1 ? `${skill.name} · ${n} waves` : `${skill.name}`;
   }
 
-  /** Blade itself — anyone in reach and in front is cut as the wave leaves the steel. */
+  /** Close-range hit as the projectile leaves the weapon. */
   private meleeCleave(skill: SkillDef, dir: THREE.Vector3) {
     const reach = meleeReach(skill);
     const origin = this.player.position;
@@ -2376,12 +2692,44 @@ export class LabEngine {
   }
 
   private hitDummy(d: Dummy, skill: SkillDef, dir: THREE.Vector3) {
+    if (d.polyT > 0 && !isPolymorph(skill) && skill.impact >= 1.2) {
+      this.clearPolymorph(d);
+    }
     d.hp -= 12 + skill.impact * 8 + skill.size * 10;
     this.safeCopy(_v, dir, FALLBACK_FORWARD);
     d.vel.addScaledVector(_v, skill.force * 0.35);
     if (skill.explosion === "ice") d.frozen = Math.max(d.frozen, 1.6);
     this.punchHit(skill);
-    this.hint = `${skill.name} hit · ${Math.max(0, Math.round(d.hp))} hp`;
+    if (isPolymorph(skill)) this.applyPolymorph(d);
+    else if (d.dummy && d.polyT <= 0) playDummyHit(d.dummy, skill.impact >= 1.4 || skill.kind === "slash" || skill.kind === "nova");
+    this.hint = isPolymorph(skill)
+      ? `${skill.name} · frog 8s`
+      : `${skill.name} hit · ${Math.max(0, Math.round(d.hp))} hp`;
+  }
+
+  private applyPolymorph(d: Dummy) {
+    if (!this.frogProto) {
+      this.hint = "Frog mesh missed";
+      return;
+    }
+    if (d.frog) d.group.remove(d.frog);
+    d.frog = makeFrogPet(this.frogProto);
+    d.group.add(d.frog);
+    if (d.dummy) d.dummy.root.visible = false;
+    d.body.visible = false;
+    d.polyT = 8;
+    d.frozen = Math.max(d.frozen, 8);
+    d.walkSpeed = 0;
+  }
+
+  private clearPolymorph(d: Dummy) {
+    if (d.frog) {
+      d.group.remove(d.frog);
+      d.frog = undefined;
+    }
+    d.polyT = 0;
+    if (d.dummy) d.dummy.root.visible = true;
+    else d.body.visible = true;
   }
 
   private impact(pos: THREE.Vector3, skill: SkillDef) {
@@ -2587,19 +2935,46 @@ export class LabEngine {
   }
 
   private drawCamera(dt: number) {
-    _v.set(Math.cos(this.camYaw), 0, -Math.sin(this.camYaw)).multiplyScalar(this.focused ? 0.62 : 0.28);
+    const hard = this.focused && !!this.lockDummy;
+    const distMul = this.camStyle === "tight" ? 0.86 : this.camStyle === "wide" ? 1.16 : 1;
+    const look = hard ? 0.42 : this.softDummy ? 0.2 : this.camStyle === "tight" ? 0.16 : this.camStyle === "wide" ? 0.08 : 0.12;
+    _v.set(Math.cos(this.camYaw), 0, -Math.sin(this.camYaw)).multiplyScalar(hard ? 0.62 : 0.28);
     if (this.ext?.rig?.shakeOffset) _v.add(this.ext.rig.shakeOffset);
     this.cameraFeel.apply(
       this.camera,
       this.player.position,
       this.camYaw,
       this.camPitch,
-      this.focused ? this.camDist * 0.86 : this.camDist,
+      this.camDist * distMul * (hard ? 0.9 : 1),
       this.aimPoint,
       this.speed,
       dt,
       _v,
-      this.focused ? 0.42 : 0.12,
+      look,
     );
+  }
+
+  private updateSoftMark() {
+    const d = this.lockDummy ?? this.softDummy;
+    const show = this.crosshairOn && !!d;
+    if (this.focusSprite) this.focusSprite.visible = show;
+    if (show && d) {
+      this.focusSprite.position.copy(d.group.position);
+      this.focusSprite.position.y = 1.55;
+      const mat = this.focusSprite.material as THREE.SpriteMaterial;
+      mat.color.setHex(this.focused && this.lockDummy === d ? 0xffe08a : 0xe8c36a);
+      _v.copy(this.focusSprite.position).project(this.camera);
+      this.markX = (_v.x * 0.5 + 0.5) * 100;
+      this.markY = (-_v.y * 0.5 + 0.5) * 100;
+    } else {
+      this.markX = -1;
+      this.markY = -1;
+    }
+    const ground = !!this.armed;
+    this.reticle.visible = ground;
+    if (ground) {
+      this.reticle.position.copy(this.aimPoint);
+      this.reticle.position.y = 0.05;
+    }
   }
 }

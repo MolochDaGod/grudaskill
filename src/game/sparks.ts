@@ -27,6 +27,8 @@ export class SparkPool {
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       sizeAttenuation: true,
+      fog: false,
+      toneMapped: false,
     });
     this.points = new THREE.Points(geo, mat);
     this.points.frustumCulled = false;

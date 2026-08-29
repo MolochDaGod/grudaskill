@@ -1,176 +1,89 @@
 import * as THREE from "three";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import type { WeatherId } from "./weather";
 
+/** One InstancedMesh of tufts (merged blades) — Three.js cannot nest instances. */
 const MAX_PLAYERS = 6;
-const BLADE_COUNT = 48000;
-const GRASS_RADIUS = 20;
-const GRASS_HEIGHT = 0.85;
-const GRASS_WIDTH = 0.12;
+const TUFT_COUNT = 720;
+const TUFT_BLADES = 7;
+const PATCH_RADIUS = 10;
+const BLADE_H = 0.34;
+const BLADE_W = 0.028;
 
 const VERT = /* glsl */ `
-uniform vec3 grassSize;
 uniform float time;
 uniform vec3 playerPositions[6];
 uniform int numPlayerPositions;
 uniform float playerInteractionRadius;
 uniform float playerInteractionStrength;
 uniform float windAmp;
-uniform vec3 sunDirection;
-varying float vGrassHeight;
-varying vec3 vWorldPosition;
-varying vec3 vGrassColor;
-
-float hash(float n) { return fract(sin(n) * 43758.5453); }
-float hash2(vec2 p) { return hash(p.x + p.y * 57.0); }
-float noise(vec2 p) {
-  vec2 i = floor(p);
-  vec2 f = fract(p);
-  float a = hash2(i);
-  float b = hash2(i + vec2(1.0, 0.0));
-  float c = hash2(i + vec2(0.0, 1.0));
-  float d = hash2(i + vec2(1.0, 1.0));
-  vec2 u = f * f * (3.0 - 2.0 * f);
-  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
-mat3 rotateY(float a) {
-  float c = cos(a);
-  float s = sin(a);
-  return mat3(c, 0.0, s, 0.0, 1.0, 0.0, -s, 0.0, c);
-}
+varying float vH;
+varying vec3 vWorld;
+varying vec3 vInstColor;
 
 void main() {
-  vec3 localPos = position;
-  float id = float(gl_InstanceID);
-  float heightVariation = mix(0.65, 1.35, hash(id * 3.0));
-  localPos.y *= heightVariation;
-  vGrassHeight = clamp(localPos.y / max(grassSize.y, 0.01), 0.0, 1.0);
-  float bladeTaper = mix(0.35, 1.0, 1.0 - vGrassHeight * vGrassHeight);
-  float widthVariation = mix(0.75, 1.45, hash(id * 5.0));
-  localPos.x *= bladeTaper * widthVariation;
+#ifdef USE_INSTANCING_COLOR
+  vInstColor = instanceColor;
+#else
+  vInstColor = vec3(0.22, 0.48, 0.16);
+#endif
+  vH = clamp(position.y / 0.36, 0.0, 1.0);
+#ifdef USE_INSTANCING
+  vec4 world = instanceMatrix * vec4(position, 1.0);
+#else
+  vec4 world = modelMatrix * vec4(position, 1.0);
+#endif
 
-  float leanAngle = (hash(id) - 0.5) * 0.28 + 0.12;
-  float leanFactor = pow(1.0 - vGrassHeight, 1.2);
-  localPos.x += leanFactor * grassSize.y * tan(leanAngle);
-
-  float angle = (hash(id * 7.0) - 0.5) * 3.14159;
-  localPos = rotateY(angle) * localPos;
-
-  vec4 worldPos = instanceMatrix * vec4(localPos, 1.0);
-
-  vec3 totalPush = vec3(0.0);
   for (int i = 0; i < 6; i++) {
     if (i >= numPlayerPositions) break;
-    vec3 pp = playerPositions[i];
-    vec2 delta = worldPos.xz - pp.xz;
-    float d = length(delta);
-    if (d > playerInteractionRadius || d < 0.001) continue;
-    float inf = pow(1.0 - smoothstep(0.0, playerInteractionRadius, d), 1.5);
-    inf *= 1.0 - smoothstep(0.2, 1.4, abs(pp.y - 0.9));
-    totalPush.xz += normalize(delta) * inf * playerInteractionStrength * vGrassHeight * grassSize.y;
+    vec2 d = world.xz - playerPositions[i].xz;
+    float dist = length(d);
+    if (dist > 0.001 && dist < playerInteractionRadius) {
+      float inf = pow(1.0 - dist / playerInteractionRadius, 1.4) * vH;
+      world.xz += normalize(d) * inf * playerInteractionStrength;
+    }
   }
-  worldPos.xyz += totalPush;
 
-  float t = time * 0.6;
-  float driftAngle = sin(t * 0.07) * 1.2;
-  vec2 baseWind = vec2(cos(driftAngle), sin(driftAngle));
-  float largeScaleNoise = noise(worldPos.xz * 0.05 + t * 0.05);
-  float smallScaleNoise = noise(worldPos.xz * 1.2 + t * 0.6);
-  float windNoise = mix(largeScaleNoise, smallScaleNoise, 0.3);
-  vec2 burstCenter = vec2(sin(t * 0.3) * 16.0, cos(t * 0.25) * 16.0);
-  float burst = smoothstep(10.0, 0.0, distance(worldPos.xz, burstCenter));
-  windNoise += burst * 0.85;
-  float bladeFactor = hash(id) * 0.5 + 0.75;
-  float bladeAngleOffset = (hash(id * 13.0) - 0.5) * 0.5;
-  vec2 windDir = normalize(baseWind + vec2(cos(bladeAngleOffset), sin(bladeAngleOffset)) * 0.25);
-  float swayFactor = 0.25 + 0.75 * vGrassHeight;
-  worldPos.xz += windDir * windNoise * swayFactor * bladeFactor * windAmp * grassSize.y;
+  float t = time * 0.85;
+  vec2 wind = vec2(cos(t * 0.13), sin(t * 0.1));
+  float n = sin(world.x * 0.85 + t) * 0.55 + sin(world.z * 1.1 + t * 1.4) * 0.45;
+  world.xz += wind * n * vH * windAmp;
 
-  vWorldPosition = worldPos.xyz;
-
-  float bladeSeed = id * 12.9898;
-  float baseNoise = hash2(vec2(bladeSeed, 0.0));
-  float tipNoise = hash2(vec2(bladeSeed, 1.0));
-  vec3 b1 = vec3(0.18, 0.38, 0.10) + (baseNoise - 0.5) * 0.08;
-  vec3 b2 = vec3(0.24, 0.44, 0.14) + (baseNoise - 0.5) * 0.08;
-  vec3 t1 = vec3(0.32, 0.52, 0.12) + (tipNoise - 0.5) * 0.08;
-  vec3 t2 = vec3(0.40, 0.58, 0.16) + (tipNoise - 0.5) * 0.08;
-  float blend = clamp(pow(vGrassHeight, 1.35) + noise(worldPos.xz * 1.3 + bladeSeed) * 0.05, 0.0, 1.0);
-  vec3 grassColor = mix(
-    mix(b1, b2, noise(worldPos.xz * 0.3 + bladeSeed)),
-    mix(t1, t2, noise(worldPos.xz * 0.35 + bladeSeed)),
-    blend
-  );
-  float sunFactor = max(0.0, dot(vec3(0.0, 1.0, 0.0), normalize(sunDirection)));
-  grassColor *= (0.72 + 0.28 * sunFactor);
-  vGrassColor = grassColor;
-
-  gl_Position = projectionMatrix * viewMatrix * worldPos;
+  vWorld = world.xyz;
+  gl_Position = projectionMatrix * viewMatrix * world;
 }
 `;
 
 const FRAG = /* glsl */ `
-#include <common>
 uniform vec3 sunDirection;
-uniform vec3 sunColor;
-uniform float sunIntensity;
-uniform vec3 ambientLight;
-varying float vGrassHeight;
-varying vec3 vWorldPosition;
-varying vec3 vGrassColor;
-
-float hash2(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-float noise(vec2 p) {
-  vec2 i = floor(p);
-  vec2 f = fract(p);
-  vec2 u = f * f * (3.0 - 2.0 * f);
-  float a = hash2(i);
-  float b = hash2(i + vec2(1.0, 0.0));
-  float c = hash2(i + vec2(0.0, 1.0));
-  float d = hash2(i + vec2(1.0, 1.0));
-  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
-
+varying float vH;
+varying vec3 vWorld;
+varying vec3 vInstColor;
 void main() {
-  vec3 N = vec3(0.0, 1.0, 0.0);
-  vec3 V = normalize(cameraPosition - vWorldPosition);
-  vec3 L = normalize(sunDirection);
-  float NdotL = max(dot(N, L), 0.0);
-  float diffuse = NdotL * sunIntensity * 0.28;
-  float SSS = pow(max(dot(N, -L), 0.0), 2.0) * 0.55;
-  float rim = pow(1.0 - abs(dot(V, N)), 2.0) * 0.28;
-  vec3 lightTerm = ambientLight * 0.85 + sunColor * (diffuse + SSS * 0.35 + rim * 0.2);
-  vec3 litColor = vGrassColor * lightTerm;
-  float heightShift = vGrassHeight * 0.1;
-  litColor.r = clamp(litColor.r + heightShift, 0.0, 1.0);
-  litColor.g = clamp(litColor.g + heightShift * 0.5, 0.0, 1.0);
-  float jitter = mix(noise(vWorldPosition.xz * 0.5), noise(vWorldPosition.xz * 0.25 + vec2(12.3, 45.6)), 0.5);
-  litColor *= mix(0.88, 1.12, jitter);
-  float dist = length(vWorldPosition.xz - cameraPosition.xz);
-  float fade = 1.0 - smoothstep(16.0, 24.0, dist);
-  if (fade < 0.04) discard;
-  litColor *= mix(0.82, 1.0, fade);
-  gl_FragColor = vec4(litColor, 1.0);
-  #include <tonemapping_fragment>
-  #include <colorspace_fragment>
+  vec3 tip = vInstColor * 1.35 + vec3(0.08, 0.12, 0.02);
+  vec3 col = mix(vInstColor * 0.72, tip, vH);
+  float lit = 0.55 + 0.45 * max(0.0, normalize(sunDirection).y);
+  col *= lit;
+  gl_FragColor = vec4(col, 1.0);
 }
 `;
 
-function makeBlade() {
-  const geo = new THREE.PlaneGeometry(GRASS_WIDTH, GRASS_HEIGHT, 1, 3);
-  const pos = geo.attributes.position!;
-  const vertsPerRow = 2;
-  const rowCount = 4;
-  for (let row = 0; row < rowCount; row++) {
-    const heightPercent = row / 3;
-    const widthScale = 1.0 - heightPercent * heightPercent * 0.8;
-    for (let col = 0; col < vertsPerRow; col++) {
-      const i = (row * vertsPerRow + col) * 3;
-      pos.array[i]! *= widthScale;
-    }
+function makeTuft() {
+  const parts: THREE.BufferGeometry[] = [];
+  for (let i = 0; i < TUFT_BLADES; i++) {
+    const g = new THREE.PlaneGeometry(BLADE_W, BLADE_H * (0.75 + (i % 3) * 0.12), 1, 3);
+    g.translate(0, BLADE_H / 2, 0);
+    const a = (i / TUFT_BLADES) * Math.PI * 2 + (i % 2) * 0.18;
+    const r = 0.035 + (i % 3) * 0.016;
+    g.rotateY(a);
+    g.translate(Math.cos(a) * r, (i % 2) * 0.015, Math.sin(a) * r);
+    parts.push(g);
   }
-  pos.needsUpdate = true;
-  geo.translate(0, GRASS_HEIGHT / 2, 0);
-  return geo;
+  const tuft = mergeGeometries(parts, false);
+  for (const g of parts) g.dispose();
+  if (!tuft) return new THREE.PlaneGeometry(BLADE_W, BLADE_H);
+  tuft.computeBoundingSphere();
+  return tuft;
 }
 
 export class GrassField {
@@ -182,42 +95,42 @@ export class GrassField {
   constructor(scene: THREE.Scene) {
     this.slots = Array.from({ length: MAX_PLAYERS }, () => new THREE.Vector3(1e6, 1e6, 1e6));
     this.material = new THREE.ShaderMaterial({
+      name: "GrassTuft",
       vertexShader: VERT,
       fragmentShader: FRAG,
       uniforms: {
         time: { value: 0 },
-        grassSize: { value: new THREE.Vector3(GRASS_WIDTH, GRASS_HEIGHT, 0) },
         playerPositions: { value: this.slots },
         numPlayerPositions: { value: 1 },
-        playerInteractionRadius: { value: 2.6 },
-        playerInteractionStrength: { value: 0.85 },
-        windAmp: { value: 0.55 },
-        sunDirection: { value: new THREE.Vector3(0.45, 0.82, 0.35).normalize() },
-        sunColor: { value: new THREE.Color(1, 0.96, 0.82) },
-        sunIntensity: { value: 1.1 },
-        ambientLight: { value: new THREE.Color(0.42, 0.48, 0.38) },
+        playerInteractionRadius: { value: 1.7 },
+        playerInteractionStrength: { value: 0.62 },
+        windAmp: { value: 0.14 },
+        sunDirection: { value: new THREE.Vector3(0.45, 0.82, 0.35) },
       },
       side: THREE.DoubleSide,
       depthWrite: true,
-      depthTest: true,
+      fog: false,
     });
-    const geo = makeBlade();
-    this.mesh = new THREE.InstancedMesh(geo, this.material, BLADE_COUNT);
-    this.mesh.frustumCulled = false;
-    this.mesh.receiveShadow = false;
-    this.mesh.castShadow = false;
+    this.mesh = new THREE.InstancedMesh(makeTuft(), this.material, TUFT_COUNT);
+    this.mesh.frustumCulled = true;
+    this.mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
     const dummy = new THREE.Object3D();
-    for (let i = 0; i < BLADE_COUNT; i++) {
-      const angle = Math.random() * Math.PI * 2;
-      const radius = Math.sqrt(Math.random()) * GRASS_RADIUS;
-      dummy.position.set(Math.cos(angle) * radius, 0, Math.sin(angle) * radius);
+    const color = new THREE.Color();
+    for (let i = 0; i < TUFT_COUNT; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const r = Math.sqrt(Math.random()) * PATCH_RADIUS;
+      dummy.position.set(Math.cos(a) * r, 0, Math.sin(a) * r);
       dummy.rotation.y = Math.random() * Math.PI * 2;
+      const s = 0.8 + Math.random() * 0.45;
+      dummy.scale.set(s, 0.75 + Math.random() * 0.5, s);
       dummy.updateMatrix();
       this.mesh.setMatrixAt(i, dummy.matrix);
+      color.setHSL(0.27 + Math.random() * 0.08, 0.52 + Math.random() * 0.2, 0.26 + Math.random() * 0.12);
+      this.mesh.setColorAt(i, color);
     }
     this.mesh.instanceMatrix.needsUpdate = true;
+    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
     this.mesh.computeBoundingSphere();
-    if (this.mesh.boundingSphere) this.mesh.boundingSphere.radius = GRASS_RADIUS + 2;
     scene.add(this.mesh);
   }
 
@@ -231,19 +144,16 @@ export class GrassField {
     this.time += dt;
     const u = this.material.uniforms;
     u.time!.value = this.time;
+    (u.sunDirection!.value as THREE.Vector3).copy(sunDir).normalize();
     this.slots[0]!.set(player.x, 0.9, player.z);
     let n = 1;
     for (let i = 0; i < others.length && n < MAX_PLAYERS; i++) {
-      const p = others[i]!;
-      this.slots[n]!.set(p.x, 0.9, p.z);
+      this.slots[n]!.set(others[i]!.x, 0.9, others[i]!.z);
       n++;
     }
     for (let i = n; i < MAX_PLAYERS; i++) this.slots[i]!.set(1e6, 1e6, 1e6);
     u.numPlayerPositions!.value = n;
-    u.sunDirection!.value.copy(sunDir).normalize();
-    u.windAmp!.value = weather === "storm" ? 1.35 : weather === "rain" ? 0.95 : weather === "dusk" ? 0.4 : 0.55;
-    const pale = weather === "snow" ? 0.55 : weather === "overcast" ? 0.75 : 1;
-    (u.sunIntensity!.value as number) = (weather === "storm" ? 0.45 : weather === "dusk" ? 0.7 : 1.1) * pale;
+    u.windAmp!.value = weather === "storm" ? 0.32 : weather === "rain" ? 0.2 : 0.14;
   }
 
   dispose() {

@@ -1,4 +1,5 @@
 import RAPIER from "@dimforge/rapier3d-compat";
+import { bootRapier } from "./rapier-boot";
 import type { FlyingSlash } from "./slash";
 
 /** Rapier layer indices 0–15. Same packing as r3f `interactionGroups`. */
@@ -79,7 +80,7 @@ export class LabPhysics {
       return;
     }
     if (this.ready && this.world) return;
-    await RAPIER.init();
+    await bootRapier();
     if (this.ready && this.world) return;
     this.world = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
     this.ready = true;
@@ -292,6 +293,30 @@ export class LabPhysics {
       this.world.step();
       this.acc -= this.STEP;
     }
+  }
+
+  dispose() {
+    if (!this.world) {
+      this.ready = false;
+      return;
+    }
+    this.resetDummies();
+    for (let i = 0; i < this.shots.length; i++) this.releaseShot(i);
+    this.tags.clear();
+    if (this.ownsWorld) {
+      this.world.free();
+    } else {
+      if (this.playerBody) this.world.removeRigidBody(this.playerBody);
+      if (this.groundCol) this.world.removeCollider(this.groundCol, true);
+      this.controller?.free();
+    }
+    this.world = null;
+    this.playerBody = null;
+    this.playerCol = null;
+    this.controller = null;
+    this.groundCol = null;
+    this.ownsWorld = false;
+    this.ready = false;
   }
 }
 

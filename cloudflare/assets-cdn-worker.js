@@ -78,6 +78,7 @@ function guessType(key) {
   if (key.endsWith(".ktx2")) return "image/ktx2";
   if (key.endsWith(".hdr")) return "image/vnd.radiance";
   if (key.endsWith(".wasm")) return "application/wasm";
+  if (key.endsWith(".drc")) return "application/octet-stream";
   if (key.endsWith(".json")) return "application/json";
   return "application/octet-stream";
 }

@@ -783,12 +783,53 @@ export const BOOK_SKILLS: SkillDef[] = [
     desc: "A seal opens over a mark and a fist comes down through it.",
     book: "samurai",
   }),
+  skill({
+    id: "t0_staff_polymorph",
+    name: "Polymorph",
+    kind: "linear",
+    school: "nature",
+    asset: "bolt",
+    color: "#86efac",
+    speed: 22,
+    impact: 0.15,
+    force: 4,
+    size: 0.28,
+    trail: 0.7,
+    desc: "Nature staff slot 3 — green bolt. Enemy becomes a frog 8s. Breaks on heavy hits.",
+    book: "staff",
+  }),
+  skill({
+    id: "staff_polymorph",
+    name: "Wild Shape",
+    kind: "linear",
+    school: "nature",
+    asset: "bolt",
+    speed: 22,
+    impact: 0.15,
+    force: 4,
+    desc: "Staff ability — same frog hex as nature T0 slot 3.",
+    book: "staff",
+  }),
+  skill({
+    id: "wand_polymorph",
+    name: "Wand Polymorph",
+    kind: "linear",
+    school: "arcane",
+    asset: "bolt",
+    color: "#c084fc",
+    speed: 24,
+    impact: 0.15,
+    force: 4,
+    size: 0.26,
+    desc: "Wand slot 3 — turn an enemy into a frog 8s. Breaks on damage.",
+    book: "wand",
+  }),
 ];
 
 export const DEFAULT_BINDINGS: Record<string, string> = {
   Digit1: "x-arrow",
   Digit2: "r-spear",
-  Digit3: "slash",
+  Digit3: "t0_staff_polymorph",
   Digit4: "flintlock",
   Digit5: "q-firebolt",
   Digit6: "magic_flame",
@@ -819,6 +860,11 @@ export const HOTBAR_KEYS = WEAPON_KEYS;
 
 export function isWeaponKey(code: string) {
   return (WEAPON_KEYS as readonly string[]).includes(code);
+}
+
+export function isPolymorph(skill: { id?: string; name?: string } | null | undefined) {
+  const blob = `${skill?.id ?? ""} ${skill?.name ?? ""}`.toLowerCase();
+  return /polymorph|wild.?shape/.test(blob);
 }
 
 export function isClassKey(code: string) {

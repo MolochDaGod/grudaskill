@@ -10,7 +10,9 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ApiD1PlayRouteImport } from './routes/api/d1-play'
 import { Route as ApiVfxCatalogRouteImport } from './routes/api/vfx-catalog'
+import { Route as ApiR2SplatRouteImport } from './routes/api/r2.$'
 import { Route as ApiSpriteSplatRouteImport } from './routes/api/sprite.$'
 
 const IndexRoute = IndexRouteImport.update({
@@ -18,9 +20,19 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiD1PlayRoute = ApiD1PlayRouteImport.update({
+  id: '/api/d1-play',
+  path: '/api/d1-play',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiVfxCatalogRoute = ApiVfxCatalogRouteImport.update({
   id: '/api/vfx-catalog',
   path: '/api/vfx-catalog',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiR2SplatRoute = ApiR2SplatRouteImport.update({
+  id: '/api/r2/$',
+  path: '/api/r2/$',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiSpriteSplatRoute = ApiSpriteSplatRouteImport.update({
@@ -31,31 +43,46 @@ const ApiSpriteSplatRoute = ApiSpriteSplatRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/api/d1-play': typeof ApiD1PlayRoute
   '/api/vfx-catalog': typeof ApiVfxCatalogRoute
+  '/api/r2/$': typeof ApiR2SplatRoute
   '/api/sprite/$': typeof ApiSpriteSplatRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/api/d1-play': typeof ApiD1PlayRoute
   '/api/vfx-catalog': typeof ApiVfxCatalogRoute
+  '/api/r2/$': typeof ApiR2SplatRoute
   '/api/sprite/$': typeof ApiSpriteSplatRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/api/d1-play': typeof ApiD1PlayRoute
   '/api/vfx-catalog': typeof ApiVfxCatalogRoute
+  '/api/r2/$': typeof ApiR2SplatRoute
   '/api/sprite/$': typeof ApiSpriteSplatRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/api/vfx-catalog' | '/api/sprite/$'
+  fullPaths:
+    '/' | '/api/d1-play' | '/api/vfx-catalog' | '/api/r2/$' | '/api/sprite/$'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/api/vfx-catalog' | '/api/sprite/$'
-  id: '__root__' | '/' | '/api/vfx-catalog' | '/api/sprite/$'
+  to: '/' | '/api/d1-play' | '/api/vfx-catalog' | '/api/r2/$' | '/api/sprite/$'
+  id:
+    | '__root__'
+    | '/'
+    | '/api/d1-play'
+    | '/api/vfx-catalog'
+    | '/api/r2/$'
+    | '/api/sprite/$'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ApiD1PlayRoute: typeof ApiD1PlayRoute
   ApiVfxCatalogRoute: typeof ApiVfxCatalogRoute
+  ApiR2SplatRoute: typeof ApiR2SplatRoute
   ApiSpriteSplatRoute: typeof ApiSpriteSplatRoute
 }
 
@@ -68,11 +95,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/d1-play': {
+      id: '/api/d1-play'
+      path: '/api/d1-play'
+      fullPath: '/api/d1-play'
+      preLoaderRoute: typeof ApiD1PlayRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/vfx-catalog': {
       id: '/api/vfx-catalog'
       path: '/api/vfx-catalog'
       fullPath: '/api/vfx-catalog'
       preLoaderRoute: typeof ApiVfxCatalogRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/r2/$': {
+      id: '/api/r2/$'
+      path: '/api/r2/$'
+      fullPath: '/api/r2/$'
+      preLoaderRoute: typeof ApiR2SplatRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/sprite/$': {
@@ -87,7 +128,9 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ApiD1PlayRoute: ApiD1PlayRoute,
   ApiVfxCatalogRoute: ApiVfxCatalogRoute,
+  ApiR2SplatRoute: ApiR2SplatRoute,
   ApiSpriteSplatRoute: ApiSpriteSplatRoute,
 }
 export const routeTree = rootRouteImport

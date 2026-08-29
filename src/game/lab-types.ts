@@ -27,6 +27,7 @@ export type HudState = {
   studioOpen: boolean;
   custom: SkillDef;
   hint: string;
+  armed: "" | "drawn" | "placing";
   buffs: string[];
   aim: AimMode;
   fleet: string;
@@ -53,7 +54,36 @@ export type HudState = {
   timeScale: number;
   focusHold: boolean;
   focused: boolean;
+  camStyle: "tight" | "normal" | "wide";
+  invertY: boolean;
+  crosshair: boolean;
+  markX: number;
+  markY: number;
+  markHard: boolean;
   pad: string;
+  gpuOn: boolean;
+  gpu: {
+    calls: number;
+    tris: number;
+    geos: number;
+    tex: number;
+    programs: number;
+    dpr: number;
+    leak: "ok" | "geo" | "tex" | "both";
+    dGeo: number;
+    dTex: number;
+    wasmMb: number;
+    api: "webgl" | "webgl2" | "webgpu";
+  };
+  debug: {
+    gl: "ok" | "lost" | "restored";
+    tickErr: number;
+    lastErr: string;
+    kit: string;
+    clips: number;
+    physics: boolean;
+    log: string[];
+  };
 };
 
 /** Method surface the HUD talks to — kept free of three.js so SSR stays light. */
@@ -62,6 +92,7 @@ export type LabEngine = {
   setCustom(partial: Partial<SkillDef>): void;
   setTouchMove(x: number, y: number): void;
   exportSkillJson(): string;
+  importLabSave(raw: string): void;
   selectElement(id: string): void;
   selectBending(id: string): void;
   toggleBoost(): void;
@@ -90,4 +121,7 @@ export type LabEngine = {
   toggleCycle(): void;
   attachRapier(world: unknown): void;
   setFocusHold(hold: boolean): void;
+  setCamStyle(style: "tight" | "normal" | "wide"): void;
+  setInvertY(on: boolean): void;
+  setCrosshair(on: boolean): void;
 };

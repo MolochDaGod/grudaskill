@@ -4,7 +4,7 @@ import type { ProjectileAsset, School, SkillDef } from "./skills";
 export type SlashStyle = "hiato" | "hiken" | "frost" | "shadow" | "gale" | "heavy" | "bolt" | "holy";
 
 export const SLASH_PALETTE: Record<SlashStyle, { core: string; flame: string }> = {
-  hiato: { core: "#e8f6c8", flame: "#3a4a20" },
+  hiato: { core: "#f2e6c8", flame: "#2a2218" },
   hiken: { core: "#ff6a28", flame: "#140804" },
   frost: { core: "#9ee8ff", flame: "#061018" },
   shadow: { core: "#c9a6ff", flame: "#0a0614" },
@@ -37,18 +37,15 @@ export function slashStyleFor(skill: SkillDef): SlashStyle {
   return "hiato";
 }
 
-/** Razor-thin vertical crescent — the air that left the blade. */
+/** Energy crescent half-extents — wide C, thin in travel, tall enough to read. */
 export function slashHalfExtents(skill: SkillDef): { x: number; y: number; z: number } {
-  const w = 0.95 + skill.length * 0.55;
-  const h = 0.72 + skill.size * 0.85;
-  return { x: w, y: h, z: 0.055 + skill.size * 0.04 };
+  const w = 1.15 + skill.length * 0.65;
+  const h = 0.42 + skill.size * 0.55;
+  return { x: w, y: h, z: 0.1 + skill.size * 0.08 };
 }
 
 export function isFlyingSlash(skill: SkillDef): boolean {
-  if (skill.kind === "slash") return true;
-  if (skill.kind === "weapon" && skill.asset !== "arrow") return true;
-  if (skill.kind === "cone" && skill.school === "physical") return true;
-  return false;
+  return skill.kind === "slash";
 }
 
 export function weaponSwingProfile(asset: ProjectileAsset): {
@@ -76,7 +73,7 @@ void main() {
   float a = (uv.x - 0.5) * uArc;
   vec3 p = position;
   p.x = sin(a) * uWidth;
-  p.z = (1.0 - cos(a)) * uWidth * 0.22;
+  p.z = (1.0 - cos(a)) * uWidth * 0.55;
   p.y = (uv.y - 0.5) * uHeight;
   vec4 w = modelMatrix * vec4(p, 1.0);
   vWorld = w.xyz;
@@ -108,27 +105,26 @@ float fbm(vec2 p){
   return v;
 }
 void main() {
-  float edge = smoothstep(0.0, 0.08, vUv.x) * smoothstep(1.0, 0.92, vUv.x);
-  float rim = smoothstep(0.0, 0.12, vUv.y) * smoothstep(1.0, 0.88, vUv.y);
-  float n = fbm(vWorld.xz * 2.4 + vec2(uTime * 1.8, uTime * -0.9));
-  float streak = fbm(vec2(vUv.x * 3.0, vUv.y * 18.0 - uTime * 8.0));
-  float blade = pow(edge * rim, 0.55);
-  float scream = smoothstep(0.35, 0.95, streak);
-  vec3 col = mix(uFlame, uCore, blade);
-  col = mix(col, uCore * 1.4, scream * 0.55);
-  float alpha = blade * uLife * (0.55 + 0.45 * scream);
+  float edge = smoothstep(0.0, 0.1, vUv.x) * smoothstep(1.0, 0.9, vUv.x);
+  float rimY = smoothstep(0.0, 0.18, vUv.y) * smoothstep(1.0, 0.82, vUv.y);
+  float n = fbm(vWorld.xz * 1.6 + vec2(uTime * 0.9, -uTime * 0.4));
+  float streak = fbm(vec2(vUv.x * 4.0, vUv.y * 10.0 - uTime * 3.5));
+  float mask = edge * rimY;
+  float rim = pow(1.0 - abs(vUv.y - 0.5) * 2.0, 2.4) * edge;
+  vec3 body = mix(uFlame, uCore * 0.25, n);
+  vec3 col = mix(body, uCore, rim + streak * 0.25);
+  float alpha = mask * uLife * (0.55 + 0.45 * rim);
   if (uMode > 0.5 && uMode < 1.5) {
-    col = mix(uFlame, uCore, scream);
-    alpha *= 0.85 + 0.3 * scream;
+    col = mix(uFlame, uCore, rim);
+    alpha *= 0.9;
   } else if (uMode > 1.5 && uMode < 2.5) {
-    float band = abs(fract(vUv.x * 9.0 + n) - 0.5);
-    col = mix(uFlame, uCore, 1.0 - smoothstep(0.0, 0.18, band));
+    col = mix(uFlame, uCore, rim);
   } else if (uMode > 2.5 && uMode < 3.5) {
-    alpha *= step(0.38, n);
+    alpha *= mix(0.5, 1.0, n);
+    col = mix(uFlame, uCore, rim);
   } else if (uMode > 5.5 && uMode < 6.5) {
-    float jag = step(0.5, fract(vUv.x * 22.0 + uTime * 14.0));
-    col = mix(uFlame, uCore, jag);
-    alpha *= 0.5 + jag * 0.6;
+    float jag = step(0.45, fract(vUv.x * 16.0 + uTime * 10.0));
+    col = mix(uFlame, uCore, jag * rim);
   }
   gl_FragColor = vec4(col, alpha);
 }
@@ -143,7 +139,7 @@ function makeGloomMat(core: string, flame: string): THREE.ShaderMaterial {
       uFlame: { value: new THREE.Vector3(f.r, f.g, f.b) },
       uLife: { value: 1 },
       uTime: { value: 0 },
-      uArc: { value: 2.15 },
+      uArc: { value: 2.6 },
       uWidth: { value: 1.2 },
       uHeight: { value: 0.85 },
       uMode: { value: 0 },
@@ -154,6 +150,8 @@ function makeGloomMat(core: string, flame: string): THREE.ShaderMaterial {
     blending: THREE.AdditiveBlending,
     depthWrite: false,
     side: THREE.DoubleSide,
+    fog: false,
+    toneMapped: false,
   });
 }
 
@@ -191,8 +189,9 @@ function makeBladeMesh(skill: SkillDef): {
   flameMat.uniforms.uHeight!.value = half.y * 1.9;
   const flame = new THREE.Mesh(plane, flameMat);
   const coreMat = makeGloomMat("#ffffff", pal.core);
+  coreMat.blending = THREE.AdditiveBlending;
   coreMat.uniforms.uWidth!.value = half.x * 0.72;
-  coreMat.uniforms.uHeight!.value = half.y * 1.15;
+  coreMat.uniforms.uHeight!.value = half.y * 0.55;
   const core = new THREE.Mesh(plane.clone(), coreMat);
   core.position.z = 0.02;
   group.add(flame, core);
@@ -207,7 +206,7 @@ export function createSlashPool(n: number, scene: THREE.Scene): FlyingSlash[] {
     name: "Slash",
     kind: "slash",
     asset: "spear",
-    color: "#e8f6c8",
+    color: "#f2e6c8",
     length: 1.6,
     trail: 0.4,
     speed: 28,
@@ -298,13 +297,13 @@ export function restyleSlash(s: FlyingSlash, skill: SkillDef) {
     mat.uniforms.uWidth!.value = w;
     mat.uniforms.uHeight!.value = h;
     mat.uniforms.uMode!.value = mode;
-    mat.uniforms.uArc!.value = style === "heavy" ? 1.45 : 2.15;
+    mat.uniforms.uArc!.value = 2.6;
   };
-  apply(s.flameMat, pal.core, pal.flame, half.x * 1.2, half.y * 1.9);
-  apply(s.coreMat, "#ffffff", pal.core, half.x * 0.72, half.y * 1.1);
+  apply(s.flameMat, pal.core, pal.flame, half.x * 1.25, half.y * 1.15);
+  apply(s.coreMat, "#ffffff", pal.core, half.x * 0.85, half.y * 0.45);
 }
 
-/** Inverse of the swing, linearized — the cut leaves the steel. */
+/** Swing direction, linearized forward from the weapon tip. */
 export function slashLaunch(
   handNow: THREE.Vector3,
   handPrev: THREE.Vector3,

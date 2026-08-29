@@ -55,7 +55,7 @@ const PRESET: Record<WeatherId, Preset> = {
     sunColor: 0xfff1cc,
     sun: 1.35,
     fog: 0xc8dff2,
-    fogDensity: 0.007,
+    fogDensity: 0.0035,
     ground: 0x5a4630,
     fall: 0,
     flakes: 0,
@@ -190,6 +190,10 @@ export class WeatherSystem {
   readonly cycle: SkyCycle;
   private fog: THREE.FogExp2;
   private renderer: THREE.WebGLRenderer;
+  private scene: THREE.Scene;
+  private pmrem: THREE.PMREMGenerator;
+  private envRT: THREE.WebGLRenderTarget | null = null;
+  private envAge = 99;
   private precip: THREE.Points;
   private precipPos: Float32Array;
   private ground: THREE.MeshStandardMaterial | null = null;
@@ -198,9 +202,12 @@ export class WeatherSystem {
 
   constructor(scene: THREE.Scene, renderer: THREE.WebGLRenderer) {
     this.renderer = renderer;
+    this.scene = scene;
+    this.pmrem = new THREE.PMREMGenerator(renderer);
     this.sky = new Sky();
-    this.sky.scale.setScalar(450);
+    this.sky.scale.setScalar(4000);
     this.sky.frustumCulled = false;
+    this.sky.renderOrder = -10;
     scene.add(this.sky);
 
     this.hemi = new THREE.HemisphereLight(0xb8d8ff, 0x3a2a18, 0.72);
@@ -217,8 +224,10 @@ export class WeatherSystem {
     scene.add(this.sun);
     scene.add(this.sun.target);
 
-    this.fog = new THREE.FogExp2(0xc8dff2, 0.007);
+    this.fog = new THREE.FogExp2(0xc8dff2, 0.0035);
     scene.fog = this.fog;
+    scene.background = null;
+    renderer.setClearColor(0xc8dff2, 1);
 
     const count = 1800;
     this.precipPos = new Float32Array(count * 3);
@@ -240,6 +249,7 @@ export class WeatherSystem {
     scene.add(this.precip);
     this.cycle = new SkyCycle(scene);
     this.set("sunny");
+    this.bakeEnv();
   }
 
   get hour() {
@@ -265,13 +275,13 @@ export class WeatherSystem {
     const p = PRESET[id];
     this.cycle.setHour(p.hour);
     const u = this.sky.material.uniforms;
-    u.turbidity.value = p.turbidity;
-    u.rayleigh.value = p.rayleigh;
-    u.mieCoefficient.value = p.mieCoefficient;
-    u.mieDirectionalG.value = p.mieDirectionalG;
-    u.cloudCoverage.value = p.cloudCoverage;
-    u.cloudDensity.value = p.cloudDensity;
-    u.cloudSpeed.value = p.cloudSpeed;
+    if (u.turbidity) u.turbidity.value = p.turbidity;
+    if (u.rayleigh) u.rayleigh.value = p.rayleigh;
+    if (u.mieCoefficient) u.mieCoefficient.value = p.mieCoefficient;
+    if (u.mieDirectionalG) u.mieDirectionalG.value = p.mieDirectionalG;
+    if (u.cloudCoverage) u.cloudCoverage.value = p.cloudCoverage;
+    if (u.cloudDensity) u.cloudDensity.value = p.cloudDensity;
+    if (u.cloudSpeed) u.cloudSpeed.value = p.cloudSpeed;
     this.hemi.groundColor.setHex(p.hemiGround);
     if (this.ground) this.ground.color.setHex(p.ground);
     const mat = this.precip.material as THREE.PointsMaterial;
@@ -280,11 +290,13 @@ export class WeatherSystem {
     this.precip.visible = p.flakes > 0;
     this.scatter(p.flakes);
     this.applySun(hourToSun(p.hour), p);
+    this.bakeEnv();
   }
 
   setHour(hour: number) {
     this.cycle.setHour(hour);
     this.applySun(hourToSun(this.cycle.hour), PRESET[this.id]);
+    this.bakeEnv();
   }
 
   setTimeScale(scale: number) {
@@ -313,6 +325,8 @@ export class WeatherSystem {
     );
     const info = this.cycle.update(dt, origin, _sun, p.cloudCoverage, _cloud);
     this.applySun(info, p);
+    this.envAge += dt;
+    if (this.cycle.timeScale > 0 && this.envAge > 2.4) this.bakeEnv();
     if (this.id === "storm") {
       this.flash -= dt;
       if (this.flash <= 0 && Math.random() < dt * 0.35) this.flash = 0.12 + Math.random() * 0.1;
@@ -344,7 +358,7 @@ export class WeatherSystem {
     this.placeSun(info.elevation, info.azimuth);
     const day = Math.max(0, Math.min(1, (info.elevation + 4) / 40));
     const u = this.sky.material.uniforms;
-    u.showSunDisc.value = info.isDay && this.id !== "overcast" && this.id !== "rain" && this.id !== "storm" ? 1 : 0;
+    if (u.showSunDisc) u.showSunDisc.value = info.isDay && this.id !== "overcast" && this.id !== "rain" && this.id !== "storm" ? 1 : 0;
     if (info.period === "Night") {
       this.hemi.color.setHex(0x1a2848);
       this.hemi.intensity = p.hemi * 0.22;
@@ -387,6 +401,19 @@ export class WeatherSystem {
     (this.precip.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
   }
 
+  private bakeEnv() {
+    this.envAge = 0;
+    const probe = new THREE.Scene();
+    const parent = this.sky.parent;
+    probe.add(this.sky);
+    const rt = this.pmrem.fromScene(probe, 0, 0.1, 2000);
+    parent?.add(this.sky);
+    this.envRT?.dispose();
+    this.envRT = rt;
+    this.scene.environment = rt.texture;
+    this.scene.environmentIntensity = 0.85;
+  }
+
   private placeSun(elevation: number, azimuth: number) {
     const phi = THREE.MathUtils.degToRad(90 - elevation);
     const theta = THREE.MathUtils.degToRad(azimuth);
@@ -397,6 +424,8 @@ export class WeatherSystem {
   }
 
   dispose() {
+    this.envRT?.dispose();
+    this.pmrem.dispose();
     this.cycle.dispose();
   }
 }

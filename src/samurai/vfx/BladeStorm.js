@@ -657,7 +657,7 @@ export class BladeStorm {
     // blade's patched copy is taken from.
     const model = template.clone(true);
     model.traverse((node) => {
-      if (!node.isMesh) return;
+      if (!node.isMesh || !node.material) return;
       node.material = Array.isArray(node.material)
         ? node.material.map(dress)
         : dress(node.material);

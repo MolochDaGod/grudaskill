@@ -14,7 +14,12 @@ export const Route = createFileRoute("/api/sprite/$")({
           return new Response("bad path", { status: 400 });
         }
         for (const root of UPSTREAMS) {
-          const res = await fetch(root + splat);
+          const res = await fetch(root + splat, {
+            headers: {
+              Origin: "https://casting.grudge.studio",
+              Referer: "https://casting.grudge.studio/",
+            },
+          });
           if (!res.ok) continue;
           const buf = await res.arrayBuffer();
           const type = res.headers.get("content-type") || "image/png";

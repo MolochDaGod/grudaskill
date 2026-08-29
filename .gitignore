@@ -3,3 +3,12 @@ node_modules/
 .github_repo
 .env
 .env.*
+casting/
+dist/
+.output/
+.nitro/
+.tanstack/
+.vercel/
+artifacts/
+*.log
+.DS_Store

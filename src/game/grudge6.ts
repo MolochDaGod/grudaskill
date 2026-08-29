@@ -1,7 +1,7 @@
 import * as THREE from "three";
-import type { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import type { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import type { ProjectileAsset } from "./skills";
-import { ASSETS_URL } from "./cdn";
+import { ASSETS_URL, viaR2 } from "./cdn";
 
 export const GRUDGE6_RACES = [
   { id: "human", name: "Human", prefix: "WK_" },
@@ -14,12 +14,11 @@ export const GRUDGE6_RACES = [
 
 export type Grudge6Id = (typeof GRUDGE6_RACES)[number]["id"];
 
-const CDN = ASSETS_URL;
 export function raceGlbUrl(id: string): string {
-  return `${CDN}/asset-packs/toon-rts-characters/glb/characters/${id}.glb`;
+  return `${ASSETS_URL}/asset-packs/toon-rts-characters/glb/characters/${id}.glb`;
 }
 
-const ANIM_BASE = `${CDN}/models/grudge6/anims`;
+const ANIM_BASE = `${ASSETS_URL}/models/grudge6/anims`;
 export const BIP001_LOCO = ["idle", "walk", "run"] as const;
 export const BIP001_SHOTS = ["attack", "cast"] as const;
 
@@ -263,12 +262,11 @@ export function fitRootUniformSi(root: THREE.Object3D, targetH = 1.8) {
 export function safeSkeletonUpdate(root: THREE.Object3D) {
   root.traverse((o) => {
     const s = o as THREE.SkinnedMesh;
-    if (s.isSkinnedMesh && s.skeleton) {
-      s.skeleton.update();
-      s.frustumCulled = false;
-      s.castShadow = true;
-      s.receiveShadow = true;
-    }
+    if (!s.isSkinnedMesh || !s.skeleton) return;
+    s.skeleton.update();
+    s.frustumCulled = false;
+    s.castShadow = true;
+    s.receiveShadow = true;
   });
 }
 
@@ -315,18 +313,102 @@ function sanitizeClip(clip: THREE.AnimationClip, name: string): THREE.AnimationC
 }
 
 let packCache: Promise<Record<string, THREE.AnimationClip>> | null = null;
+const glbBytes = new Map<string, Promise<ArrayBuffer>>();
+
+export function fetchGlbBytes(url: string): Promise<ArrayBuffer> {
+  let hit = glbBytes.get(url);
+  if (!hit) {
+    hit = (async () => {
+      let res = await fetch(url, { mode: "cors" });
+      if (res.status === 403 || res.status === 0) {
+        const proxied = viaR2(url);
+        if (proxied !== url) res = await fetch(proxied);
+      }
+      if (!res.ok) throw new Error(`glb ${res.status} ${url}`);
+      return res.arrayBuffer();
+    })().catch((err) => {
+      glbBytes.delete(url);
+      throw err;
+    });
+    glbBytes.set(url, hit);
+  }
+  return hit;
+}
+
+export async function parseCachedGlb(loader: GLTFLoader, url: string) {
+  try {
+    return await loader.loadAsync(url);
+  } catch (err) {
+    const proxied = viaR2(url);
+    if (proxied !== url) return loader.loadAsync(proxied);
+    throw err;
+  }
+}
+
+function disposeParsedScene(root: THREE.Object3D) {
+  disposeGpuTree(root);
+}
+
+const _seen = new Set<unknown>();
+
+/** Drop GPU buffers for a discarded graph. Safe on swapped toons / dummy kits. */
+export function disposeGpuTree(root: THREE.Object3D) {
+  _seen.clear();
+  root.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (mesh.isMesh) {
+      if (mesh.geometry && !_seen.has(mesh.geometry)) {
+        _seen.add(mesh.geometry);
+        mesh.geometry.dispose();
+      }
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const mat of mats) {
+        if (!mat || _seen.has(mat)) continue;
+        _seen.add(mat);
+        const maps = [
+          "map",
+          "normalMap",
+          "roughnessMap",
+          "metalnessMap",
+          "emissiveMap",
+          "aoMap",
+          "alphaMap",
+          "bumpMap",
+          "displacementMap",
+        ] as const;
+        for (const k of maps) {
+          const tex = (mat as THREE.MeshStandardMaterial)[k];
+          if (tex && !_seen.has(tex)) {
+            _seen.add(tex);
+            tex.dispose();
+          }
+        }
+        mat.dispose();
+      }
+    }
+    const skinned = o as THREE.SkinnedMesh;
+    if (skinned.isSkinnedMesh) skinned.skeleton?.dispose();
+  });
+  _seen.clear();
+}
 
 export function loadBip001Packs(loader: GLTFLoader): Promise<Record<string, THREE.AnimationClip>> {
   if (packCache) return packCache;
   const names = [...BIP001_LOCO, ...BIP001_SHOTS];
   packCache = Promise.all(
     names.map(async (name) => {
-      const gltf = await loader.loadAsync(`${ANIM_BASE}/${name}.glb`);
-      const src = gltf.animations[0];
-      if (!src) throw new Error(`no clip ${name}`);
-      return [name, sanitizeClip(src, name)] as const;
+      try {
+        const gltf = await parseCachedGlb(loader, `${ANIM_BASE}/${name}.glb`);
+        const src = gltf.animations[0];
+        if (!src) return null;
+        const clip = sanitizeClip(src, name);
+        disposeParsedScene(gltf.scene);
+        return [name, clip] as const;
+      } catch {
+        return null;
+      }
     }),
-  ).then((pairs) => Object.fromEntries(pairs));
+  ).then((pairs) => Object.fromEntries(pairs.filter((p): p is readonly [string, THREE.AnimationClip] => !!p)));
   return packCache;
 }
 
@@ -382,7 +464,8 @@ export function writeToonBoneSegments(
 
 export function bindMixer(rig: ToonRig, clips: Record<string, THREE.AnimationClip>) {
   if (rig.mixer) rig.mixer.stopAllAction();
-  const mixer = new THREE.AnimationMixer(rig.root);
+  const target = rig.root.children[0] ?? rig.root;
+  const mixer = new THREE.AnimationMixer(target);
   const actions: Record<string, THREE.AnimationAction> = {};
   for (const [name, clip] of Object.entries(clips)) {
     const action = mixer.clipAction(clip);
@@ -394,7 +477,7 @@ export function bindMixer(rig: ToonRig, clips: Record<string, THREE.AnimationCli
     } else {
       action.setLoop(THREE.LoopOnce, 1);
       action.clampWhenFinished = true;
-      action.enabled = true;
+      action.enabled = false;
       action.setEffectiveWeight(0);
     }
     actions[name] = action;
@@ -408,6 +491,7 @@ export function tickMixer(
   dt: number,
   speed: number,
   overlay: "attack" | "cast" | null,
+  hold = false,
 ) {
   if (!rig.mixer) return;
   const idle = rig.actions.idle;
@@ -426,27 +510,35 @@ export function tickMixer(
     wWalk = k;
     wIdle = 1 - k;
   }
-  idle?.setEffectiveWeight(wIdle);
-  walk?.setEffectiveWeight(wWalk);
-  run?.setEffectiveWeight(wRun);
-  if (overlay && overlay !== rig.overlay) {
+  if (overlay) {
     const shot = rig.actions[overlay];
     if (shot) {
+      shot.enabled = true;
       shot.reset();
       shot.setEffectiveWeight(1);
-      shot.fadeIn(0.06);
+      shot.setEffectiveTimeScale(1);
+      shot.paused = false;
       shot.play();
+      if (hold) {
+        shot.time = Math.min(0.16, shot.getClip().duration * 0.28);
+        shot.paused = true;
+      }
+      rig.overlay = overlay;
     }
-    rig.overlay = overlay;
   }
-  if (rig.overlay) {
+  if (rig.overlay && !hold) {
     const shot = rig.actions[rig.overlay];
-    if (shot && !shot.isRunning()) {
-      shot.fadeOut(0.12);
+    const clip = shot?.getClip();
+    if (shot && clip && shot.time >= clip.duration - 0.04) {
+      shot.fadeOut(0.1);
       shot.setEffectiveWeight(0);
       rig.overlay = null;
     }
   }
+  const busy = !!rig.overlay;
+  idle?.setEffectiveWeight(busy ? wIdle * 0.2 : wIdle);
+  walk?.setEffectiveWeight(busy ? wWalk * 0.2 : wWalk);
+  run?.setEffectiveWeight(busy ? wRun * 0.2 : wRun);
   rig.mixer.update(dt);
 }
 

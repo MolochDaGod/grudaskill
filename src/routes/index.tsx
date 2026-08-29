@@ -8,16 +8,19 @@ export const Route = createFileRoute("/")({
 function Home() {
   const [Lab, setLab] = useState<ComponentType<{ autoEnter?: boolean }> | null>(null);
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
   const enter = useCallback(() => {
     if (busy) return;
     setBusy(true);
+    setErr(null);
     void import("@/components/ability-lab")
       .then((m) => {
         setLab(() => m.AbilityLab);
       })
-      .catch(() => {
+      .catch((e: Error) => {
         setBusy(false);
+        setErr(e?.message || "Could not load the lab");
       });
   }, [busy]);
 
@@ -57,6 +60,7 @@ function Home() {
         >
           {busy ? "Loading kits…" : "Enter the lab"}
         </button>
+        {err ? <p className="mt-3 text-center text-xs text-red-400">{err}</p> : null}
         <p className="mt-3 text-center text-xs text-muted">
           1–6 weapons · R F V T G B class · LMB places the shot
         </p>

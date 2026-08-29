@@ -1,0 +1,87 @@
+{
+  "source": "https://info.grudge-studio.com/api/v1/master-weaponSkills.json",
+  "browse": "https://info.grudge-studio.com/WEAPON_SKILLS.html",
+  "note": "Slot 3 · Choose One on ALL nature staffs (STAFF starterSlots[2] ability). Wand already has wand_polymorph on slot 3.",
+  "weaponType": "STAFF",
+  "slot": 3,
+  "slotType": "ability",
+  "label": "Slot 3 · Choose One",
+  "patch": {
+    "addChoiceIds": ["t0_staff_polymorph", "staff_polymorph"],
+    "keepExisting": ["t0_staff_vine_lash", "t0_staff_healing_sprout"]
+  },
+  "skills": [
+    {
+      "uuid": "SKIL-T0-POLY-FROG-01",
+      "id": "t0_staff_polymorph",
+      "name": "Polymorph",
+      "description": "Turn enemy into a frog for 8s. Breaks on heavy damage.",
+      "tier": 0,
+      "damage": 0,
+      "cooldown": 12,
+      "castTime": 0.7,
+      "range": 14,
+      "projectile": "spell",
+      "damageType": "nature",
+      "effects": ["Frog form 8s", "Breaks on heavy DMG"],
+      "resourceCost": { "mana": 8, "stamina": 0 },
+      "statConnections": {
+        "scalesWith": ["WIS", "INT"],
+        "primaryAttribute": "WIS",
+        "resourceAttribute": "INT",
+        "derivedStats": ["cooldownReduction", "abilityCost", "ccResistance"],
+        "damageType": "nature",
+        "slotRole": "ability"
+      },
+      "prefab": {
+        "modelRef": "staffNature",
+        "vfxRef": "earth_surge",
+        "impactRef": "frog_pet",
+        "animationClip": "magic/standing 1h cast spell 01",
+        "formMesh": "/models/dummies/frog-pet.glb"
+      }
+    },
+    {
+      "uuid": "SKIL-STAFF-POLY-FROG-02",
+      "id": "staff_polymorph",
+      "name": "Wild Shape",
+      "description": "Staff ability — same frog hex as nature T0 slot 3.",
+      "tier": 2,
+      "damage": 0,
+      "cooldown": 16,
+      "castTime": 0.8,
+      "range": 15,
+      "projectile": "spell",
+      "damageType": "nature",
+      "effects": ["Frog form 8s", "Breaks on heavy DMG"],
+      "statConnections": {
+        "scalesWith": ["WIS", "INT"],
+        "primaryAttribute": "WIS",
+        "damageType": "nature",
+        "slotRole": "ability"
+      }
+    },
+    {
+      "uuid": "SKIL-20260604081946-0000B2--2364746",
+      "id": "wand_polymorph",
+      "name": "Polymorph",
+      "description": "Turn enemy into harmless creature (frog pet mesh).",
+      "tier": 2,
+      "damage": 0,
+      "cooldown": 20,
+      "castTime": 0.8,
+      "range": 15,
+      "projectile": "spell",
+      "damageType": "arcane",
+      "effects": ["Disable 4s", "Frog form", "Breaks on DMG"],
+      "statConnections": {
+        "scalesWith": ["INT", "WIS"],
+        "primaryAttribute": "INT",
+        "damageType": "arcane",
+        "slotRole": "ability"
+      },
+      "alreadyInCatalog": true,
+      "catalogSlot": "WAND slots[2] ability"
+    }
+  ]
+}

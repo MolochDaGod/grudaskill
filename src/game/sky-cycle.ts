@@ -208,7 +208,7 @@ export class SkyCycle {
     this.clouds.scale.setScalar(220);
     this.clouds.frustumCulled = false;
     this.clouds.renderOrder = -1;
-    scene.add(this.clouds);
+    this.clouds.visible = false;
 
     const count = 1800;
     const geo = new THREE.BufferGeometry();

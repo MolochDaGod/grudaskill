@@ -51,7 +51,7 @@ const PLAY_CODES = [...WEAPON_KEYS, ...CLASS_KEYS] as const;
 
 function slotOf(hud: HudState, code: string) {
   const id = hud.bindings[code];
-  const row = hud.book.find((s) => s.id === id);
+  const row = (hud.book ?? []).find((s) => s.id === id);
   const on = hud.skill.id === id;
   return {
     code,
@@ -73,7 +73,7 @@ export function TightHud({
   const slots = PLAY_CODES.map((code) => slotOf(hud, code));
   const hpPct = Math.max(0, Math.min(100, hud.hp));
   const mpPct = Math.max(0, Math.min(100, hud.mana ?? 100));
-  const kit = hud.kits.find((k) => k.id === hud.kitId);
+  const kit = (hud.kits ?? []).find((k) => k.id === hud.kitId);
   const name = kit?.name ?? "Warlord";
   const letter = (hud.kitId || name).slice(0, 2).toUpperCase();
   const hpOrb = orbStyle(TB_ORB_HP);

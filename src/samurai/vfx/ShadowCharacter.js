@@ -8,7 +8,7 @@ import {
   MeshStandardMaterial,
   Vector3
 } from 'three';
-import { clone as cloneRigged } from 'three/examples/jsm/utils/SkeletonUtils.js';
+import { clone as cloneRigged } from 'three/addons/utils/SkeletonUtils.js';
 
 import { settings } from '../config/settings.js';
 import { frame } from '../core/FrameUniforms.js';

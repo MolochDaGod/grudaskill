@@ -44,8 +44,8 @@ export function SpellBook({
   onClose: () => void;
 }) {
   const [activeFilter, setActiveFilter] = useState("all");
-  const books = ["all", ...Array.from(new Set(hud.book.map((s) => s.book)))];
-  const rows = hud.book.filter((s) => {
+  const books = ["all", ...Array.from(new Set((hud.book ?? []).map((s) => s.book)))];
+  const rows = (hud.book ?? []).filter((s) => {
     if (activeFilter === "all") return true;
     return s.book === activeFilter || s.kind === activeFilter;
   });

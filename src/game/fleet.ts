@@ -20,6 +20,17 @@ export type VfxEntry = {
   style?: string;
 };
 
+export type D1Asset = {
+  id: string;
+  name: string;
+  category: string;
+  r2Key: string;
+  cdnUrl: string;
+  layer?: string;
+  purpose?: string;
+  fileSize?: number;
+};
+
 export type D1SpellParams = Record<string, Record<string, number | string>>;
 
 export type FleetSnapshot = {
@@ -39,6 +50,26 @@ const CDN_MODELS = {
 } as const;
 
 export const MODEL_URLS = CDN_MODELS;
+
+let playIndex: D1Asset[] = [];
+
+export function playAssets(): D1Asset[] {
+  return playIndex;
+}
+
+/** D1 is the index; R2 is the file. Never fetch mesh bytes from SQL. */
+export function resolvePlayUrl(suffix: string, fallback: string): string {
+  const needle = suffix.replace(/^\/+/, "").toLowerCase();
+  const hit = playIndex.find((a) => {
+    const key = (a.r2Key || a.cdnUrl || "").toLowerCase();
+    return key.endsWith(needle) || key.includes(`/${needle}`);
+  });
+  return viaR2(hit?.cdnUrl || fallback);
+}
+
+export function setPlayIndex(rows: D1Asset[]) {
+  playIndex = rows.filter((a) => a.cdnUrl && a.r2Key);
+}
 
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { mode: "cors" });

@@ -33,6 +33,23 @@ const EXPLOSIONS: { id: ExplosionKind; label: string }[] = [
   { id: "kinetic", label: "Impact" },
 ];
 
+function mergeHud(prev: HudState, next: Partial<HudState>): HudState {
+  return {
+    ...prev,
+    ...next,
+    skill: next.skill ?? prev.skill,
+    custom: next.custom ?? prev.custom,
+    kits: next.kits ?? prev.kits ?? [],
+    buffs: next.buffs ?? prev.buffs ?? [],
+    book: next.book ?? prev.book ?? [],
+    effects: next.effects ?? prev.effects ?? [],
+    tunes: next.tunes ?? prev.tunes ?? [],
+    bindings: next.bindings ?? prev.bindings,
+    gpu: next.gpu ?? prev.gpu,
+    debug: next.debug ?? prev.debug,
+  };
+}
+
 const EMPTY: HudState = {
   paused: false,
   skillName: "Fire Bolt",
@@ -45,6 +62,7 @@ const EMPTY: HudState = {
   studioOpen: false,
   custom: defaultCustomSkill(),
   hint: "Linking D1 / VFX…",
+  armed: "",
   buffs: [],
   aim: "mouse",
   fleet: "idle",
@@ -78,7 +96,16 @@ const EMPTY: HudState = {
   timeScale: 0,
   focusHold: false,
   focused: false,
+  camStyle: "normal",
+  invertY: false,
+  crosshair: true,
+  markX: -1,
+  markY: -1,
+  markHard: false,
   pad: "",
+  gpuOn: false,
+  gpu: { calls: 0, tris: 0, geos: 0, tex: 0, programs: 0, dpr: 1, leak: "ok", dGeo: 0, dTex: 0, wasmMb: 0, api: "webgl2" },
+  debug: { gl: "ok", tickErr: 0, lastErr: "", kit: "human", clips: 0, physics: false, log: [] },
 };
 
 export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
@@ -93,22 +120,34 @@ export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
   }> | null>(null);
 
   const [ready3d, setReady3d] = useState(false);
+  const [bootErr, setBootErr] = useState<string | null>(null);
+
+  const applyHud = useCallback((s: HudState) => {
+    setHud((prev) => mergeHud(prev, s));
+  }, []);
 
   const onEngine = useCallback((e: LabEngine | null) => {
-    engineRef.current = e;
-    setReady3d(!!e);
+    if (e) {
+      engineRef.current = e;
+      setReady3d(true);
+    } else {
+      engineRef.current = null;
+    }
   }, []);
 
   useEffect(() => {
     if (!entered) return;
     let dead = false;
-    import("@/components/lab-canvas").then((m) => {
-      if (!dead) setCanvas3d(() => m.LabCanvas);
-    });
+    import("@/components/lab-canvas")
+      .then((m) => {
+        if (dead) return;
+        setCanvas3d(() => m.LabCanvas);
+      })
+      .catch((err: Error) => {
+        if (!dead) setBootErr(err?.message || "Could not load the arena");
+      });
     return () => {
       dead = true;
-      setCanvas3d(null);
-      engineRef.current = null;
     };
   }, [entered]);
 
@@ -146,11 +185,16 @@ export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
 
   return (
     <main className="relative h-dvh w-full overflow-hidden bg-bg text-fg">
-      {entered && Canvas3d ? <Canvas3d onHud={setHud} onEngine={onEngine} /> : null}
+      {entered && Canvas3d ? <Canvas3d onHud={applyHud} onEngine={onEngine} /> : null}
 
-      {entered && !ready3d && (
-        <div className="absolute inset-0 z-20 grid place-items-center bg-bg">
-          <p className="text-sm tracking-[0.28em] text-gold uppercase">Summoning the arena…</p>
+      {entered && !Canvas3d && (
+        <div className="absolute inset-0 z-20 grid place-items-center bg-bg px-4">
+          <div className="hud-panel max-w-md rounded-lg p-6 text-center">
+            <p className="text-sm tracking-[0.28em] text-gold uppercase">
+              {bootErr ? "Arena failed" : "Summoning the arena…"}
+            </p>
+            {bootErr ? <p className="mt-3 text-sm text-muted">{bootErr}</p> : null}
+          </div>
         </div>
       )}
 
@@ -208,8 +252,37 @@ export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
               </div>
               <p className="mt-1 text-xs text-muted">{hud.hint}</p>
             </div>
+            {hud.gpuOn && hud.gpu ? (
+              <div className="hud-panel pointer-events-none rounded-lg px-3 py-2 font-mono text-[11px] leading-5 text-muted">
+                <div className="text-gold">Debug · F3 · Shift+F3 copy</div>
+                <div>
+                  gl {hud.debug?.gl ?? "ok"} · {hud.gpu.api ?? "webgl2"}
+                  {hud.debug?.physics ? " · rapier" : " · no physics"} · {hud.fps} fps
+                </div>
+                <div>
+                  {hud.gpu.calls} draws · {(hud.gpu.tris / 1000).toFixed(1)}k tris
+                </div>
+                <div>
+                  {hud.gpu.geos} geo · {hud.gpu.tex} tex · {hud.gpu.programs} programs
+                </div>
+                <div>
+                  dpr {hud.gpu.dpr} · wasm {hud.gpu.wasmMb} mb · leak {hud.gpu.leak}
+                  {hud.gpu.leak !== "ok" ? ` Δg${hud.gpu.dGeo} Δt${hud.gpu.dTex}` : ""}
+                </div>
+                <div>
+                  kit {hud.debug?.kit ?? hud.kitId} · clips {hud.debug?.clips ?? 0}
+                  {hud.debug?.tickErr ? ` · tick×${hud.debug.tickErr}` : ""}
+                </div>
+                {hud.debug?.lastErr ? <div className="text-primary">{hud.debug.lastErr}</div> : null}
+                {(hud.debug?.log ?? []).slice(-3).map((line) => (
+                  <div key={line} className="truncate text-[10px] text-muted/80">
+                    {line}
+                  </div>
+                ))}
+              </div>
+            ) : null}
             <div className="flex flex-wrap gap-1.5">
-              {hud.kits.map((k) => (
+              {(hud.kits ?? []).map((k) => (
                 <button
                   key={k.id}
                   type="button"
@@ -223,7 +296,7 @@ export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
                   {k.name}
                 </button>
               ))}
-              {hud.buffs.map((b) => (
+              {(hud.buffs ?? []).map((b) => (
                 <span
                   key={b}
                   className="hud-panel rounded-full px-2 py-0.5 text-[11px] tracking-wide text-gold"
@@ -273,6 +346,36 @@ export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
                 onClick={() => engineRef.current?.setFocusHold(!hud.focusHold)}
               >
                 RMB {hud.focusHold ? "Hold" : "Toggle"}
+              </button>
+              {(["tight", "normal", "wide"] as const).map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  className={`pointer-events-auto rounded-full border px-2.5 py-1 text-[11px] capitalize ${
+                    hud.camStyle === s ? "border-gold bg-surface text-gold" : "border-border hud-panel text-fg"
+                  }`}
+                  onClick={() => engineRef.current?.setCamStyle(s)}
+                >
+                  {s}
+                </button>
+              ))}
+              <button
+                type="button"
+                className={`pointer-events-auto rounded-full border px-2.5 py-1 text-[11px] ${
+                  hud.invertY ? "border-gold bg-surface text-gold" : "border-border hud-panel text-fg"
+                }`}
+                onClick={() => engineRef.current?.setInvertY(!hud.invertY)}
+              >
+                Invert Y
+              </button>
+              <button
+                type="button"
+                className={`pointer-events-auto rounded-full border px-2.5 py-1 text-[11px] ${
+                  hud.crosshair ? "border-gold bg-surface text-gold" : "border-border hud-panel text-fg"
+                }`}
+                onClick={() => engineRef.current?.setCrosshair(!hud.crosshair)}
+              >
+                Sight
               </button>
               {hud.pad ? (
                 <span className="pointer-events-none rounded-full border border-gold/50 bg-surface px-2.5 py-1 text-[11px] text-gold">
@@ -427,11 +530,11 @@ export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
                 {KIND_LABEL[hud.skill.kind]} · {hud.skill.school} · {hud.skill.book}
               </p>
               <p className="mb-3 text-xs leading-relaxed text-muted">{hud.skill.desc}</p>
-              {hud.tunes.length > 0 && (
+              {hud.tunes && hud.tunes.length > 0 && (
                 <>
                   <div className="mb-2 text-[11px] tracking-wide text-muted">Live GLSL</div>
                   <div className="mb-3 grid gap-1.5">
-                    {hud.tunes.map((k) => (
+                    {(hud.tunes ?? []).map((k) => (
                       <MiniSlider
                         key={`${k.source}.${k.block}.${k.key}`}
                         label={k.label}
@@ -446,7 +549,7 @@ export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
                 </>
               )}
               <div className="mb-2 text-[11px] tracking-wide text-muted">This skill</div>
-              {editorMeters(hud.skill.kind).map((m) => (
+              {editorMeters(hud.skill?.kind ?? "linear").map((m) => (
                 <MiniSlider
                   key={m.k}
                   label={m.label}
@@ -568,7 +671,7 @@ export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
               </div>
               <p className="mt-3 text-[11px] text-muted">D1 VFX catalog — tap to bind to T</p>
               <div className="mt-2 flex max-h-40 flex-wrap gap-1 overflow-auto">
-                {hud.effects.map((e) => (
+                {(hud.effects ?? []).map((e) => (
                   <button
                     key={e.id}
                     type="button"

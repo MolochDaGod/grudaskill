@@ -142,9 +142,70 @@ function authPopupPlugin(): Plugin {
   };
 }
 
-// `0.0.0.0:8080` is the live-preview contract — don't change host/port.
-// The dev server starts once `src/router.tsx` and `src/routes/` exist — see
-// AGENTS.md § "First scaffold".
+function rapierWasmUrlPlugin(): Plugin {
+  return {
+    name: "rapier-wasm-url",
+    enforce: "pre",
+    transform(code, id) {
+      if (!id.includes("rapier") || !code.includes("<deleted>")) return;
+      return code.replace(
+        /new URL\(\s*["']rapier_wasm3d_bg\.wasm["']\s*,\s*["']<deleted>["']\s*\)/g,
+        'new URL("/rapier_wasm3d_bg.wasm", (globalThis.location&&globalThis.location.href)||"http://localhost/")',
+      );
+    },
+  };
+}
+
+/** Vite still injects localhost:8080 into @vite/client behind the preview proxy. */
+function grokPreviewWsPlugin(): Plugin {
+  return {
+    name: "grok-preview-ws",
+    apply: "serve",
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const pathOnly = (req.url ?? "").split("?", 1)[0];
+        if (pathOnly !== "/@vite/client") {
+          next();
+          return;
+        }
+        const chunks: Buffer[] = [];
+        const end = res.end.bind(res);
+        res.write = ((chunk: unknown) => {
+          if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+          return true;
+        }) as typeof res.write;
+        res.end = ((chunk?: unknown) => {
+          if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+          let body = Buffer.concat(chunks).toString("utf8");
+          if (body.includes("directSocketHost")) {
+            body = body
+              .replace(
+                /const serverHost = "[^"]*";/,
+                'const serverHost = location.host+"/";',
+              )
+              .replace(
+                /const socketHost = `[^`]+`;/,
+                "const socketHost = location.host;",
+              )
+              .replace(
+                /const directSocketHost = "[^"]*";/,
+                'const directSocketHost = location.host+"/";',
+              );
+          }
+          const buf = Buffer.from(body);
+          try {
+            res.setHeader("Content-Length", String(buf.length));
+          } catch {
+            /* headers sent */
+          }
+          return end(buf);
+        }) as typeof res.end;
+        next();
+      });
+    },
+  };
+}
+
 export default defineConfig(({ command, isPreview }) => ({
   server: {
     host: "0.0.0.0",
@@ -152,8 +213,12 @@ export default defineConfig(({ command, isPreview }) => ({
     strictPort: true,
     allowedHosts: true,
     hmr: {
+      overlay: false,
       protocol: "wss",
       clientPort: 443,
+    },
+    headers: {
+      "Cache-Control": "no-store",
     },
     watch: {
       ignored: ["**/casting/**", "**/.git/**", "**/node_modules/**"],
@@ -165,14 +230,26 @@ export default defineConfig(({ command, isPreview }) => ({
     strictPort: true,
   },
   resolve: { tsconfigPaths: true },
+  assetsInclude: ["**/*.wasm"],
   optimizeDeps: {
-    include: ["react", "react-dom", "react/jsx-runtime", "lucide-react"],
+    include: [
+      "react",
+      "react-dom",
+      "react/jsx-runtime",
+      "lucide-react",
+      "three",
+      "three/addons/loaders/GLTFLoader.js",
+      "three/addons/loaders/DRACOLoader.js",
+      "three/addons/objects/Sky.js",
+      "three/addons/utils/SkeletonUtils.js",
+      "@react-three/fiber",
+    ],
     exclude: ["@dimforge/rapier3d-compat", "@react-three/rapier"],
   },
   ssr: {
     external: [
       "three",
-      "three/examples/jsm/loaders/GLTFLoader.js",
+      "three/addons/loaders/GLTFLoader.js",
       "@dimforge/rapier3d-compat",
       "@react-three/fiber",
       "@react-three/drei",
@@ -180,12 +257,11 @@ export default defineConfig(({ command, isPreview }) => ({
     ],
   },
   plugins: [
+    grokPreviewWsPlugin(),
+    rapierWasmUrlPlugin(),
     pgliteBootstrapPlugin(),
-    // Before tanstackStart so /auth/popup never falls through to the SPA.
     authPopupPlugin(),
-    // Dev-only /__app-env, read by scripts/check-auth-invariant.mjs.
     appEnvPlugin(),
-    // PWA head + ?install=1 tutorial page; runs before Start/Nitro.
     grokPwaPlugin(),
     tailwindcss(),
     tanstackStart(),
@@ -193,10 +269,13 @@ export default defineConfig(({ command, isPreview }) => ({
       ? [
           nitro({
             preset: "vercel",
-            // Auto-registers server/middleware/* (the PWA install page +
-            // manifest + head-tag middleware). Nitro v3 defaults serverDir to
-            // false, so removing this silently unwires /?install=1 on deploys.
             serverDir: "./server",
+            routeRules: {
+              "/draco/**": { headers: { "cache-control": "public, max-age=31536000, immutable" } },
+              "/models/**": { headers: { "cache-control": "public, max-age=31536000, immutable" } },
+              "/api/r2/**": { headers: { "cache-control": "public, max-age=604800" } },
+              "/hud-tight-bar.png": { headers: { "cache-control": "public, max-age=86400" } },
+            },
           }),
         ]
       : []),

@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { makeGltfLoader } from "../game/gltf-pipeline.ts";
 import {
   BoxGeometry,
   CylinderGeometry,
@@ -68,7 +68,7 @@ export class SamuraiRuntime {
     this.toon = null;
     this.elapsed = 0;
     this._launchIn = 0;
-    this.loader = new GLTFLoader();
+    this.loader = makeGltfLoader();
     enableMainCameraLayers(camera);
 
     this.character = {

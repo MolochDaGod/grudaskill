@@ -1,16 +1,14 @@
 /**
  * Cloudflare delivery SSOT for this lab.
  *
- *   R2 bucket  → Worker + custom domain assets.grudge-studio.com (proxied)
- *   D1         → search index only, never the mesh bytes
+ *   D1         → rows only: spell params + play-kit index (r2Key, cdnUrl, size)
+ *   R2 + Worker→ mesh / Draco / ktx2 / wasm bytes on assets.grudge-studio.com
  *   Workers    → JSON catalogs (vfx api), not binary
+ *   localStorage → editor saves (skills, binds) — not SQL
+ *   PGlite/Neon  → auth scaffold only; never GLBs or VFX
  *
- * Probe (2026-08-29): GLBs return Cache-Control + CF-Cache-Tag but NO
- * CF-Cache-Status — Worker responses are DYNAMIC and .glb is not in
- * Cloudflare's default cached-extension list. Fix:
- *   Caching → Cache Rules  (cloudflare/assets-cache-rules.json)
- *   CF_API_TOKEN + CF_ZONE_ID  node scripts/apply-r2-cache-rules.mjs
- * Purge: 3d-model  /  models
+ * Do not PUT heavy systems (GLB, grass, shaders, Rapier wasm) into D1.
+ * Query `?purpose=play` (~53 rows) — never the 6k catalog dump.
  */
 function env(key: string, fallback: string) {
   try {
@@ -31,4 +29,25 @@ export const D1_ASSETS_URL = env("VITE_D1_ASSETS_URL", "https://api.grudge-studi
 export function assetUrl(key: string) {
   const path = key.replace(/^\/+/, "");
   return `${ASSETS_URL}/${path}`;
+}
+
+/** Same-origin R2 proxy — Cloudflare hotlink-blocks grok preview / grok.me Origins. */
+export function r2Path(key: string) {
+  return `/api/r2/${key.replace(/^\/+/, "")}`;
+}
+
+export function viaR2(url: string) {
+  if (!url) return url;
+  if (url.startsWith("/api/r2/") || url.startsWith("/api/")) return url;
+  if (url.startsWith("/")) return url;
+  try {
+    const u = new URL(url);
+    if (u.hostname === "assets.grudge-studio.com" || (u.hostname.endsWith(".grudge-studio.com") && u.hostname.includes("assets"))) {
+      return r2Path(u.pathname.replace(/^\/+/, ""));
+    }
+  } catch {
+    /* keep */
+  }
+  if (url.startsWith(ASSETS_URL)) return r2Path(url.slice(ASSETS_URL.length));
+  return url;
 }
