@@ -40,6 +40,17 @@ export const SOLVER = {
 };
 
 const HIT_TYPES = RAPIER.ActiveCollisionTypes.ALL;
+const FIXED_DT = 1 / 60;
+
+/**
+ * Soft-CCD look-ahead in metres. 0 disables it.
+ * Rule: `speed * step + thickness`, capped so the broadphase stays cheap.
+ * Typical arrow 28 m/s → ~0.72 m; bolt 50 m/s → ~1.08 m.
+ */
+export function softCcdDistance(speed: number, radius = 0.25, dt = FIXED_DT) {
+  if (speed <= 0) return 0;
+  return Math.min(2.2, speed * dt + radius);
+}
 
 function collide(desc: RAPIER.ColliderDesc, collision: number, solver: number, hits = false) {
   desc.setCollisionGroups(collision);
@@ -118,7 +129,7 @@ export class LabPhysics {
     }
     if (!this.playerBody) {
       this.playerBody = this.world.createRigidBody(
-        RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, 0.9, 0).setCcdEnabled(true),
+        RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, 0.9, 0),
       );
       this.playerCol = this.world.createCollider(
         collide(RAPIER.ColliderDesc.capsule(0.45, 0.42).setTranslation(0, 0, 0), GROUPS.player, SOLVER.solid),
@@ -185,7 +196,9 @@ export class LabPhysics {
 
   attachSlash(slash: FlyingSlash) {
     if (!this.world) return;
-    const rb = this.world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setCcdEnabled(true));
+    const rb = this.world.createRigidBody(
+      RAPIER.RigidBodyDesc.kinematicPositionBased().setSoftCcdPrediction(softCcdDistance(14, slash.half.z)),
+    );
     const col = this.world.createCollider(
       collide(
         RAPIER.ColliderDesc.cuboid(slash.half.x, slash.half.y, slash.half.z).setSensor(true),
@@ -202,13 +215,19 @@ export class LabPhysics {
   syncSlash(slash: FlyingSlash) {
     const body = slash.body as { rb: RAPIER.RigidBody; col: RAPIER.Collider } | null;
     if (!body) return;
-    body.rb.setNextKinematicTranslation({ x: slash.pos.x, y: slash.pos.y, z: slash.pos.z });
-    body.rb.setNextKinematicRotation({
+    const p = body.rb.translation();
+    const vx = (slash.pos.x - p.x) * 60;
+    const vy = (slash.pos.y - p.y) * 60;
+    const vz = (slash.pos.z - p.z) * 60;
+    body.rb.setLinvel({ x: vx, y: vy, z: vz }, true);
+    body.rb.setSoftCcdPrediction(softCcdDistance(Math.hypot(vx, vy, vz), slash.half.z));
+    body.rb.setTranslation({ x: slash.pos.x, y: slash.pos.y, z: slash.pos.z }, true);
+    body.rb.setRotation({
       x: slash.quat.x,
       y: slash.quat.y,
       z: slash.quat.z,
       w: slash.quat.w,
-    });
+    }, true);
   }
 
   releaseSlash(slash: FlyingSlash) {
@@ -254,7 +273,9 @@ export class LabPhysics {
     if (!this.world) return;
     this.releaseShot(index);
     const rb = this.world.createRigidBody(
-      RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(x, y, z).setCcdEnabled(true),
+      RAPIER.RigidBodyDesc.kinematicPositionBased()
+        .setTranslation(x, y, z)
+        .setSoftCcdPrediction(softCcdDistance(32, radius)),
     );
     const col = this.world.createCollider(
       collide(RAPIER.ColliderDesc.ball(radius).setSensor(true), GROUPS.projectile, SOLVER.ghost, true),
@@ -267,7 +288,14 @@ export class LabPhysics {
   syncShot(index: number, x: number, y: number, z: number) {
     const s = this.shots[index];
     if (!s) return;
-    s.rb.setNextKinematicTranslation({ x, y, z });
+    const p = s.rb.translation();
+    const vx = (x - p.x) * 60;
+    const vy = (y - p.y) * 60;
+    const vz = (z - p.z) * 60;
+    const spd = Math.hypot(vx, vy, vz);
+    s.rb.setLinvel({ x: vx, y: vy, z: vz }, true);
+    s.rb.setSoftCcdPrediction(softCcdDistance(spd, s.col.radius() || 0.22));
+    s.rb.setTranslation({ x, y, z }, true);
   }
 
   shotHits(index: number, ignore: Set<number>): number[] {

@@ -81,6 +81,9 @@ export type SkillDef = {
   school: School;
   book: string;
   desc: string;
+  palette?: Record<string, string>;
+  script?: string;
+  shader?: string;
 };
 
 export const STORAGE_KEY = "grudge-ability-lab-v5";
@@ -660,8 +663,46 @@ export const BOOK_SKILLS: SkillDef[] = [
     asset: "bolt",
     speed: 22,
     trail: 0.8,
-    desc: "Linear air bending — wind volume down the aim line.",
+    desc: "Linear air bending — original wind volume down the aim line.",
     book: "bending",
+  }),
+  skill({
+    id: "water_bending",
+    name: "Water Bending",
+    kind: "linear",
+    asset: "ice",
+    school: "frost",
+    explosion: "ice",
+    desc: "Original water bending — same UUID pool as Water Whip.",
+    book: "bending",
+  }),
+  skill({
+    id: "air_bending",
+    name: "Air Bending",
+    kind: "linear",
+    school: "nature",
+    asset: "bolt",
+    desc: "Original air bending — same UUID pool as Air Gale.",
+    book: "bending",
+  }),
+  skill({
+    id: "earth_bending",
+    name: "Earth Bending",
+    kind: "linear",
+    school: "physical",
+    asset: "bolt",
+    desc: "Original earth bending — plates and a tower, UUID-pooled.",
+    book: "bending",
+  }),
+  skill({
+    id: "lighting_beam",
+    name: "Lighting Beam",
+    kind: "beam",
+    asset: "bolt",
+    school: "holy",
+    length: 18,
+    desc: "Original linear Nova Beam — sustained ray, pooled mesh UUID.",
+    book: "linear",
   }),
   skill({
     id: "magic_flame",
@@ -891,22 +932,42 @@ export type SkillSave = {
   custom?: SkillDef;
   bindings?: Record<string, string>;
   patches?: Record<string, Partial<SkillDef>>;
+  extras?: SkillDef[];
+  settings?: LabSettings;
+};
+
+export type LabSettings = {
+  focusHold?: boolean;
+  weather?: string;
+  hour?: number;
+  kitId?: string;
+  armor?: string;
+  activeMode?: boolean;
+  animIntensity?: number;
 };
 
 export function loadSkills(): {
   catalog: SkillDef[];
   custom: SkillDef;
   bindings: Record<string, string>;
+  settings: LabSettings;
 } {
   const catalog = BOOK_SKILLS.map((s) => ({ ...s }));
   let custom = defaultCustomSkill();
   let bindings = { ...DEFAULT_BINDINGS };
+  let settings: LabSettings = {};
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as SkillSave;
       if (parsed.custom?.id) custom = { ...custom, ...parsed.custom, id: "custom" };
       if (parsed.bindings) bindings = { ...bindings, ...parsed.bindings };
+      if (parsed.settings) settings = parsed.settings;
+      if (Array.isArray(parsed.extras)) {
+        for (const extra of parsed.extras) {
+          if (extra?.id && extra.name && !catalog.some((s) => s.id === extra.id)) catalog.push(extra);
+        }
+      }
       if (parsed.patches) {
         for (const s of catalog) {
           const p = parsed.patches[s.id];
@@ -919,14 +980,18 @@ export function loadSkills(): {
   }
   const idx = catalog.findIndex((s) => s.id === "custom");
   if (idx >= 0) catalog[idx] = custom;
-  return { catalog, custom, bindings };
+  return { catalog, custom, bindings, settings };
 }
 
-export function saveSkillState(state: {
-  custom: SkillDef;
-  bindings: Record<string, string>;
-  catalog: SkillDef[];
-}) {
+export function saveSkillState(
+  state: {
+    custom: SkillDef;
+    bindings: Record<string, string>;
+    catalog: SkillDef[];
+    settings?: LabSettings;
+  },
+  _immediate = false,
+) {
   const patches: Record<string, Partial<SkillDef>> = {};
   for (const s of state.catalog) {
     const base = BOOK_SKILLS.find((b) => b.id === s.id);
@@ -938,14 +1003,51 @@ export function saveSkillState(state: {
     });
     if (Object.keys(diff).length) patches[s.id] = diff;
   }
+  const extras = state.catalog.filter((s) => !BOOK_SKILLS.some((b) => b.id === s.id) && s.id !== "custom");
   try {
     localStorage.setItem(
       STORAGE_KEY,
-      JSON.stringify({ v: 5, custom: state.custom, bindings: state.bindings, patches }),
+      JSON.stringify({
+        v: 5,
+        custom: state.custom,
+        bindings: state.bindings,
+        patches,
+        extras,
+        settings: state.settings ?? {},
+      }),
     );
   } catch {
     /* quota */
   }
+}
+
+export function parseLabSave(raw: string): SkillSave | null {
+  try {
+    const parsed = JSON.parse(raw) as SkillSave;
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function installSaveFlush(fn: () => void): () => void {
+  const hide = () => fn();
+  const vis = () => {
+    if (document.visibilityState === "hidden") fn();
+  };
+  window.addEventListener("pagehide", hide);
+  document.addEventListener("visibilitychange", vis);
+  return () => {
+    window.removeEventListener("pagehide", hide);
+    document.removeEventListener("visibilitychange", vis);
+  };
+}
+
+export function castGate(kind: SkillKind): "auto" | "draw" | "place" {
+  if (kind === "buff") return "auto";
+  if (kind === "nova" || kind === "ritual" || kind === "portal" || kind === "cone" || kind === "dash") return "place";
+  return "draw";
 }
 
 export function skillById(catalog: SkillDef[], custom: SkillDef, id: string): SkillDef {

@@ -1,4 +1,4 @@
-import { ASSETS_URL, D1_ASSETS_URL, OBJECTSTORE_URL, VFX_API_URL, VFX_ASSETS_URL, assetUrl } from "./cdn";
+import { ASSETS_URL, D1_ASSETS_URL, OBJECTSTORE_URL, VFX_API_URL, VFX_ASSETS_URL, assetUrl, viaR2 } from "./cdn";
 
 export const FLEET = {
   vfxApi: VFX_API_URL,

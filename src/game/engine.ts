@@ -34,6 +34,7 @@ import {
   tickMixer,
   findEquippedWeapon,
   weaponMuzzleWorld,
+  restIdle,
   type ToonRig,
 } from "./grudge6";
 import { makeForwardMesh, orientForward } from "./orient";
@@ -63,6 +64,17 @@ import { wasmHeapBytes } from "./rapier-boot";
 import { WeatherSystem, type WeatherId } from "./weather";
 
 import { GrassField } from "./grass";
+import { plantFeet } from "./foot-ik";
+import { clipForSkill, weaponClass } from "./anim-queue";
+import { loadMagicRocks, rockIndexForSchool } from "./magic-rocks";
+import {
+  snapshotColors,
+  applyShaderPreset,
+  writeColor,
+  resetShaderBlock,
+  presetsFor,
+} from "./vfx-tune";
+import { SHADER_PRESETS, swatchOf } from "./color-shaders";
 import { makeDummyRig, makeFrogPet, parseDummyGltf, playDummyHit, tickDummyRig, TRAINING_DUMMY_URL, FROG_PET_URL, type DummyRig } from "./training-dummy";
 
 declare global {
@@ -208,8 +220,6 @@ function makeCrosshairTex() {
 function makeMat(color: number, opts: Partial<THREE.MeshStandardMaterialParameters> = {}) {
   return new THREE.MeshStandardMaterial({ color, metalness: 0.35, roughness: 0.45, ...opts });
 }
-  return new THREE.MeshStandardMaterial({ color, metalness: 0.35, roughness: 0.45, ...opts });
-}
 
 export class LabEngine {
   private renderer: THREE.WebGLRenderer;
@@ -309,6 +319,7 @@ export class LabEngine {
   private weatherSys!: WeatherSystem;
   private grass!: GrassField;
   private activeMode = false;
+  private animIntensity = 1;
   private simTime = 0;
   private hitStop = 0;
   private moveFwd = new THREE.Vector3();
@@ -317,7 +328,7 @@ export class LabEngine {
   private fleetLabel = "linking D1 / VFX…";
   private effects: VfxEntry[] = [];
   private loader = makeGltfLoader();
-  private pendingOverlay: "attack" | "cast" | null = null;
+  private pendingOverlay: string | null = null;
   private animPacks: Record<string, THREE.AnimationClip> | null = null;
   private gravity = new THREE.Vector3(0, -18, 0);
   private collidersOn = false;
@@ -333,6 +344,17 @@ export class LabEngine {
   private handPrev = new THREE.Vector3(0, 1.2, 0);
   private pendingSlash: { skill: SkillDef; t: number } | null = null;
   private armed: { id: string; gate: "draw" | "place" } | null = null;
+  private bowDraw = 0;
+  private bowDrawing = false;
+  private staffChannel: {
+    skill: SkillDef;
+    t: number;
+    max: number;
+    stars: { id: number; lit: boolean; offset: THREE.Vector3 }[];
+    dummy: Dummy | null;
+    fired: boolean;
+  } | null = null;
+  private rockProto: THREE.Group[] = [];
   private drawLine!: THREE.Line;
   private drawPts = new Float32Array(6);
   private ownLoop = true;
@@ -714,6 +736,92 @@ export class LabEngine {
     this.emit();
   }
 
+  setAnimIntensity(v: number) {
+    this.animIntensity = THREE.MathUtils.clamp(v, 0.45, 1.6);
+    if (this.toon) this.toon.intensity = this.animIntensity;
+    this.emit();
+  }
+
+  private tuneSrc(): { source: "ext" | "bend" | "lin" | "sam"; block: string } {
+    if (this.kitMode === "bending") return { source: "bend", block: this.bendElement };
+    if (this.kitMode === "linear") return { source: "lin", block: this.element };
+    if (this.kitMode === "samurai") return { source: "sam", block: this.element };
+    return { source: "ext", block: this.element };
+  }
+
+  applyShader(id: string) {
+    const preset = SHADER_PRESETS.find((p) => p.id === id);
+    if (!preset) return;
+    const { source, block } = this.tuneSrc();
+    applyShaderPreset(source, block, preset);
+    const skill = skillById(this.catalog, this.custom, this.activeSkillId);
+    skill.shader = preset.id;
+    skill.palette = Object.fromEntries(snapshotColors(source, block).map((c) => [c.key, c.value]));
+    skill.color = swatchOf(preset);
+    this.hint = `Shader · ${preset.name}`;
+    this.persist();
+    this.emit();
+  }
+
+  writeShaderColor(key: string, hex: string) {
+    const { source, block } = this.tuneSrc();
+    writeColor(source, block, key, hex);
+    const skill = skillById(this.catalog, this.custom, this.activeSkillId);
+    skill.palette = { ...(skill.palette ?? {}), [key]: hex };
+    this.persist();
+    this.emit();
+  }
+
+  resetShader() {
+    const { source, block } = this.tuneSrc();
+    resetShaderBlock(source, block);
+    const skill = skillById(this.catalog, this.custom, this.activeSkillId);
+    delete skill.palette;
+    delete skill.shader;
+    this.hint = "Shader defaults";
+    this.persist();
+    this.emit();
+  }
+
+  saveNamedSkill(name: string) {
+    const n = name.trim().slice(0, 42);
+    if (!n) {
+      this.hint = "Name the skill first";
+      this.emit();
+      return;
+    }
+    const base = skillById(this.catalog, this.custom, this.activeSkillId);
+    const { source, block } = this.tuneSrc();
+    const palette = Object.fromEntries(snapshotColors(source, block).map((c) => [c.key, c.value]));
+    const slug = n.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "skill";
+    const id = `user_${slug}_${Math.random().toString(36).slice(2, 6)}`;
+    const next: SkillDef = {
+      ...structuredClone(base),
+      id,
+      name: n,
+      book: "saved",
+      palette,
+      shader: base.shader,
+      color: palette.colorCore || palette.colorMid || palette.colorInner || base.color,
+      desc: base.desc || `Saved from ${base.name}`,
+    };
+    this.catalog.push(next);
+    this.activeSkillId = id;
+    this.hint = `Saved skill · ${n}`;
+    this.persist(true);
+    this.emit();
+  }
+
+  clickStaffStar(id: number) {
+    const ch = this.staffChannel;
+    if (!ch || ch.fired) return;
+    const star = ch.stars.find((s) => s.id === id);
+    if (!star || star.lit) return;
+    star.lit = true;
+    if (ch.stars.every((s) => s.lit)) this.completeStaffChannel();
+    else this.emit();
+  }
+
   private applyKitForSkill(id: string) {
     const skill = skillById(this.catalog, this.custom, id);
     this.showWeapon(skill.asset);
@@ -984,8 +1092,106 @@ export class LabEngine {
     this.touchMove.x = x;
     this.touchMove.y = y;
   }
+  private isStaffBolt(id = this.activeSkillId) {
+    const skill = skillById(this.catalog, this.custom, id);
+    if (isPolymorph(skill)) return false;
+    if (this.kitMode === "bending" || this.kitMode === "linear" || this.kitMode === "samurai") return false;
+    if (skill.kind !== "linear" && skill.kind !== "weapon") return false;
+    return weaponClass(skill.asset, skill.kind) === "staff";
+  }
   castCurrent() {
+    if (this.staffChannel && !this.staffChannel.fired) return;
+    if (this.isStaffBolt()) {
+      this.beginStaffChannel();
+      return;
+    }
     this.castSkill(this.activeSkillId);
+  }
+  releaseCurrent() {
+    /* bow / channel release */
+  }
+  private beginStaffChannel() {
+    if (this.staffChannel) return;
+    const skill = skillById(this.catalog, this.custom, this.activeSkillId);
+    this.applyKitForSkill(skill.id);
+    this.showWeapon(skill.asset);
+    this.pendingOverlay = this.castOverlay();
+    const dummy = this.lockDummy ?? this.dummies.find((d) => d.hp > 0) ?? null;
+    if (dummy) {
+      this.lockDummy = dummy;
+      this.focused = true;
+    }
+    const stars = [0, 1, 2].map((id) => {
+      const a = Math.random() * Math.PI * 2;
+      const r = 0.45 + Math.random() * 0.55;
+      return {
+        id,
+        lit: false,
+        offset: new THREE.Vector3(Math.cos(a) * r, 1.15 + Math.random() * 0.7, Math.sin(a) * r),
+      };
+    });
+    this.staffChannel = { skill, t: 0, max: 1.55, stars, dummy, fired: false };
+    this.hint = "Click the three stars";
+    this.emit();
+  }
+  private completeStaffChannel() {
+    const ch = this.staffChannel;
+    if (!ch || ch.fired) return;
+    ch.fired = true;
+    const skill = ch.skill;
+    this.mana = Math.max(0, this.mana - 8);
+    this.fireT = 0.4;
+    const origin = this.weaponTip(_v3);
+    this.sparks.burst(origin, skill.color, 22, 3.4, 1.3);
+    this.spawnShot(skill);
+    this.hint = skill.name;
+    this.emit();
+  }
+  private failStaffChannel() {
+    if (!this.staffChannel) return;
+    this.staffChannel = null;
+    if (this.toon?.overlay) {
+      const act = this.toon.actions[this.toon.overlay];
+      act?.fadeOut(0.22);
+      this.toon.overlay = null;
+      restIdle(this.toon);
+    }
+    this.hint = "Cast broke";
+    this.emit();
+  }
+  private tickStaffChannel(dt: number) {
+    const ch = this.staffChannel;
+    if (!ch) return;
+    if (!ch.fired) {
+      ch.t += dt;
+      if (ch.t >= ch.max) {
+        this.failStaffChannel();
+        return;
+      }
+    } else if (this.toon?.overlay) {
+      const act = this.toon.actions[this.toon.overlay];
+      if (act?.paused) act.paused = false;
+    } else {
+      this.staffChannel = null;
+    }
+    this.emit();
+  }
+  private staffStarsHud() {
+    const ch = this.staffChannel;
+    if (!ch || ch.fired) return [];
+    const origin = ch.dummy?.group.position ?? this.aimPoint;
+    const w = this.canvas.clientWidth || 1;
+    const h = this.canvas.clientHeight || 1;
+    return ch.stars.map((s) => {
+      _v.copy(origin).add(s.offset);
+      _v.project(this.camera);
+      return {
+        id: s.id,
+        lit: s.lit,
+        x: (_v.x * 0.5 + 0.5) * w,
+        y: (-_v.y * 0.5 + 0.5) * h,
+      };
+    });
   }
 
   async importAsset(file: File) {
@@ -1161,6 +1367,11 @@ export class LabEngine {
     } catch {
       /* skip */
     }
+    try {
+      this.rockProto = await loadMagicRocks(this.loader);
+    } catch {
+      this.rockProto = [];
+    }
     this.emit();
   }
 
@@ -1223,6 +1434,7 @@ export class LabEngine {
       studioOpen: this.studioOpen,
       custom: this.custom,
       hint: this.hint,
+      armed: this.staffChannel && !this.staffChannel.fired ? "drawn" : this.armed ? (this.armed.gate === "place" ? "placing" : "drawn") : "",
       buffs: this.buffs,
       aim: this.aim,
       fleet: this.fleetLabel,
@@ -1268,6 +1480,19 @@ export class LabEngine {
       markX: this.markX,
       markY: this.markY,
       markHard: !!(this.focused && this.lockDummy),
+      bowDraw: 0,
+      bowZone: "" as const,
+      animIntensity: this.animIntensity,
+      shaders: presetsFor(
+        this.kitMode,
+        this.kitMode === "bending" ? this.bendElement : this.element,
+      ).map((p) => ({ id: p.id, name: p.name, swatch: swatchOf(p) })),
+      shaderColors: snapshotColors(
+        this.kitMode === "bending" ? "bend" : this.kitMode === "linear" ? "lin" : "ext",
+        this.kitMode === "bending" ? this.bendElement : this.element,
+      ),
+      staffStars: this.staffStarsHud(),
+      staffCast: this.staffChannel && !this.staffChannel.fired ? 1 - this.staffChannel.t / this.staffChannel.max : 0,
       pad: this.pad?.connected ? this.pad.id : "",
       gpuOn: this.gpuOn,
       gpu: this.gpu,
@@ -1544,7 +1769,7 @@ export class LabEngine {
     if (proto) {
       const c = proto.clone(true);
       c.visible = true;
-      c.scale.setScalar(skill.length / 1.1);
+      if (!proto.userData.rock) c.scale.setScalar(skill.length / 1.1);
       return c;
     }
     const g = new THREE.Group();
@@ -1717,6 +1942,7 @@ export class LabEngine {
     if (e.button === 0 && !this.editorOpen && !this.studioOpen && !this.bookOpen) {
       this.updatePointer(e);
       this.updateAim();
+      if (this.staffChannel && !this.staffChannel.fired) return;
       this.castCurrent();
     }
   };
@@ -1956,10 +2182,15 @@ export class LabEngine {
     if (dir.lengthSq() < 0.0001) dir.copy(FALLBACK_FORWARD);
     dir.normalize();
     this.onTravel(shot, origin, dir, skill);
-    const key = `${skill.id}|${skill.asset}|${skill.color}|${skill.length}|${skill.size}`;
+    const key = `${skill.id}|${skill.asset}|${skill.school}|${skill.color}|${skill.length}|${skill.size}`;
     if (shot.skillKey !== key) {
       this.scene.remove(shot.mesh);
-      shot.mesh = this.makeProjectileMesh(skill, skill.asset === "arrow" ? this.arrowProto : skill.id === "custom" ? this.customProto : null);
+      const ri = rockIndexForSchool(skill.school);
+      const rock = weaponClass(skill.asset, skill.kind) === "staff" ? this.rockProto[ri] : null;
+      shot.mesh = this.makeProjectileMesh(
+        skill,
+        skill.asset === "arrow" ? this.arrowProto : skill.id === "custom" ? this.customProto : rock,
+      );
       this.scene.add(shot.mesh);
       shot.skillKey = key;
     }
@@ -2135,6 +2366,7 @@ export class LabEngine {
     this.physics.step(dt);
     this.sampleHand();
     this.animateWarlord(dt);
+    this.tickStaffChannel(dt);
     this.updateShots(dt);
     this.updateSlashes(dt);
     this.updateNovas(dt);
@@ -2284,9 +2516,10 @@ export class LabEngine {
     if (this.toon) {
       if (this.fireT > 0) this.fireT -= dt;
       const overlay = this.pendingOverlay;
-      this.pendingOverlay = null;
-      tickMixer(this.toon, dt, this.speed, overlay);
-      plantFeet(this.toon.root, dt, 0, 0.03);
+      const holdStaff = !!this.staffChannel && !this.staffChannel.fired;
+      if (!holdStaff) this.pendingOverlay = null;
+      tickMixer(this.toon, dt, this.speed, holdStaff ? overlay || this.castOverlay() : overlay, holdStaff);
+      if (!holdStaff && !this.toon.overlay) plantFeet(this.toon.root, dt, 0, 0.03);
     } else {
       if (this.fireT > 0) this.fireT -= dt;
     }
@@ -2299,22 +2532,13 @@ export class LabEngine {
     }
   }
 
-  private castOverlay(): "attack" | "cast" {
+  private castOverlay(): string {
     const skill = skillById(this.catalog, this.custom, this.activeSkillId);
-    if (skill.kind === "slash" || skill.kind === "weapon" || skill.kind === "dash") return "attack";
-    if (
-      skill.kind === "buff" ||
-      skill.kind === "ritual" ||
-      skill.kind === "portal" ||
-      skill.kind === "nova" ||
-      skill.kind === "beam" ||
-      skill.kind === "path" ||
-      skill.kind === "cone"
-    ) {
-      return "cast";
-    }
+    const clip = clipForSkill(skill);
+    if (this.toon?.actions[clip]) return clip;
     if (skill.asset === "fire" || skill.asset === "ice" || skill.asset === "bolt") return "cast";
-    return "attack";
+    if (skill.kind === "slash" || skill.kind === "weapon" || skill.kind === "dash") return "attack";
+    return "cast";
   }
 
   private updateShots(dt: number) {

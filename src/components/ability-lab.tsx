@@ -44,6 +44,9 @@ function mergeHud(prev: HudState, next: Partial<HudState>): HudState {
     book: next.book ?? prev.book ?? [],
     effects: next.effects ?? prev.effects ?? [],
     tunes: next.tunes ?? prev.tunes ?? [],
+    shaders: next.shaders ?? prev.shaders ?? [],
+    shaderColors: next.shaderColors ?? prev.shaderColors ?? [],
+    staffStars: next.staffStars ?? prev.staffStars ?? [],
     bindings: next.bindings ?? prev.bindings,
     gpu: next.gpu ?? prev.gpu,
     debug: next.debug ?? prev.debug,
@@ -88,8 +91,11 @@ const EMPTY: HudState = {
   kitMode: "sandbox",
   bendElement: "fire",
   tunes: [],
+  shaders: [],
+  shaderColors: [],
   weather: "sunny",
   activeMode: false,
+  animIntensity: 1,
   hour: 12,
   clock: "12:00 PM",
   period: "Midday",
@@ -102,6 +108,10 @@ const EMPTY: HudState = {
   markX: -1,
   markY: -1,
   markHard: false,
+  bowDraw: 0,
+  bowZone: "",
+  staffStars: [],
+  staffCast: 0,
   pad: "",
   gpuOn: false,
   gpu: { calls: 0, tris: 0, geos: 0, tex: 0, programs: 0, dpr: 1, leak: "ok", dGeo: 0, dTex: 0, wasmMb: 0, api: "webgl2" },
@@ -113,6 +123,7 @@ export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
   const [entered, setEntered] = useState(autoEnter);
   const [hud, setHud] = useState<HudState>(EMPTY);
   const [joy, setJoy] = useState({ active: false, x: 0, y: 0 });
+  const [saveName, setSaveName] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
   const [Canvas3d, setCanvas3d] = useState<ComponentType<{
     onHud: (s: HudState) => void;
@@ -242,15 +253,7 @@ export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
         <>
           <header className="pointer-events-none absolute left-3 top-3 z-10 flex max-w-[min(100%-1.5rem,22rem)] flex-col gap-2">
             <div className="hud-panel pointer-events-auto rounded-lg px-3 py-2">
-              <div className="flex items-center gap-2">
-                <Crosshair className="size-4 text-primary" />
-                <span className="font-display text-lg leading-none">{hud.skillName}</span>
-                <span className="rounded-full bg-gold/20 px-2 py-0.5 text-[10px] tracking-wide text-gold uppercase">
-                  Warlords
-                </span>
-                <span className="ml-auto text-xs text-muted">{hud.fps}</span>
-              </div>
-              <p className="mt-1 text-xs text-muted">{hud.hint}</p>
+              <p className="text-xs text-muted">{hud.hint}</p>
             </div>
             {hud.gpuOn && hud.gpu ? (
               <div className="hud-panel pointer-events-none rounded-lg px-3 py-2 font-mono text-[11px] leading-5 text-muted">
@@ -377,6 +380,18 @@ export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
               >
                 Sight
               </button>
+              <label className="pointer-events-auto flex items-center gap-1 rounded-full border border-border hud-panel px-2 py-1 text-[11px] text-muted">
+                Anim
+                <input
+                  type="range"
+                  min={0.5}
+                  max={1.5}
+                  step={0.05}
+                  value={hud.animIntensity ?? 1}
+                  className="w-16 accent-gold"
+                  onChange={(e) => engineRef.current?.setAnimIntensity(Number(e.target.value))}
+                />
+              </label>
               {hud.pad ? (
                 <span className="pointer-events-none rounded-full border border-gold/50 bg-surface px-2.5 py-1 text-[11px] text-gold">
                   Pad
@@ -503,10 +518,44 @@ export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
             <button
               type="button"
               className="pointer-events-auto absolute bottom-28 right-3 min-h-12 min-w-24 rounded-lg bg-fire px-4 py-3 text-sm font-semibold text-bg shadow-lg md:hidden"
-              onClick={() => engineRef.current?.castCurrent()}
+              onPointerDown={(e) => {
+                e.preventDefault();
+                engineRef.current?.castCurrent();
+              }}
+              onPointerUp={() => engineRef.current?.releaseCurrent()}
+              onPointerCancel={() => engineRef.current?.releaseCurrent()}
             >
-              Cast
+              {hud.skill.asset === "arrow" ? "Draw" : "Cast"}
             </button>
+            {(hud.staffStars?.length ?? 0) > 0 ? (
+              <div className="pointer-events-none absolute inset-0 z-40">
+                {hud.staffCast > 0 ? (
+                  <div className="pointer-events-none absolute top-[18%] left-1/2 h-1.5 w-40 -translate-x-1/2 overflow-hidden rounded-full border border-[#3a2a14] bg-black/70">
+                    <div className="h-full bg-[#f0c44a]" style={{ width: `${Math.round(hud.staffCast * 100)}%` }} />
+                  </div>
+                ) : null}
+                {hud.staffStars.map((s) => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    className="pointer-events-auto absolute size-12 -translate-x-1/2 -translate-y-1/2 animate-pulse"
+                    style={{ left: s.x, top: s.y }}
+                    onPointerDown={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      engineRef.current?.clickStaffStar(s.id);
+                    }}
+                  >
+                    <img
+                      src={s.lit ? "/hud/stars/star.svg" : "/hud/stars/star-black.svg"}
+                      alt=""
+                      className="size-12 drop-shadow-[0_0_10px_#f4e2a8]"
+                      draggable={false}
+                    />
+                  </button>
+                ))}
+              </div>
+            ) : null}
             <TightHud
               hud={hud}
               onSlot={(code) => {
@@ -514,10 +563,38 @@ export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
                   engineRef.current?.bindToSlot(code);
                   return;
                 }
-                engineRef.current?.setActiveSkill(hud.bindings[code]!);
+                const id = hud.bindings[code]!;
+                engineRef.current?.setActiveSkill(id);
+                if (/arrow|bow/i.test(id)) return;
                 if (!hud.bookOpen && !hud.editorOpen) engineRef.current?.castCurrent();
               }}
             />
+            {hud.bowDraw > 0.01 ? (
+              <div className="pointer-events-none absolute bottom-[22%] left-1/2 z-20 w-[min(72vw,28rem)] -translate-x-1/2">
+                <p className="mb-1 text-center text-[10px] tracking-[0.2em] text-gold uppercase">
+                  {hud.bowZone === "best"
+                    ? "Best shot"
+                    : hud.bowZone === "hit"
+                      ? "Always hit"
+                      : hud.bowZone === "likely"
+                        ? "Likely hit"
+                        : "Likely miss"}
+                </p>
+                <div className="relative h-3 overflow-hidden rounded-sm border border-[#3a2a14] bg-black/70 shadow-[0_0_12px_#000]">
+                  <div
+                    className="absolute inset-y-0 left-0 bg-[url('/hud/bars/fillers/bowattack.png')] bg-left bg-no-repeat"
+                    style={{
+                      width: `${Math.round(hud.bowDraw * 100)}%`,
+                      backgroundSize: `${Math.round(100 / Math.max(hud.bowDraw, 0.04))}% 100%`,
+                    }}
+                  />
+                  <div
+                    className="pointer-events-none absolute inset-y-0 w-px bg-white/90"
+                    style={{ left: `${Math.round(hud.bowDraw * 100)}%` }}
+                  />
+                </div>
+              </div>
+            ) : null}
           </footer>
 
           {hud.editorOpen && (
@@ -547,6 +624,48 @@ export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
                     ))}
                   </div>
                 </>
+              )}
+              {(hud.shaders?.length ?? 0) > 0 && (
+                <>
+                  <div className="mb-2 text-[11px] tracking-wide text-muted">Color shaders</div>
+                  <div className="mb-3 flex flex-wrap gap-1.5">
+                    {hud.shaders.map((s) => (
+                      <button
+                        key={s.id}
+                        type="button"
+                        onClick={() => engineRef.current?.applyShader(s.id)}
+                        className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] ${
+                          hud.skill.shader === s.id ? "border-gold text-gold" : "border-border text-fg"
+                        }`}
+                      >
+                        <span className="size-2.5 rounded-full" style={{ background: s.swatch }} />
+                        {s.name}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+              {(hud.shaderColors?.length ?? 0) > 0 && (
+                <div className="mb-3 grid gap-1.5">
+                  {hud.shaderColors.map((c) => (
+                    <label key={c.key} className="flex items-center justify-between text-xs text-muted">
+                      {c.label}
+                      <input
+                        type="color"
+                        value={c.value}
+                        onChange={(e) => engineRef.current?.writeShaderColor(c.key, e.target.value)}
+                        className="h-7 w-10 cursor-pointer rounded border border-border bg-transparent"
+                      />
+                    </label>
+                  ))}
+                  <button
+                    type="button"
+                    className="rounded-full border border-border px-2 py-1 text-[11px] text-muted"
+                    onClick={() => engineRef.current?.resetShader()}
+                  >
+                    Reset shader defaults
+                  </button>
+                </div>
               )}
               <div className="mb-2 text-[11px] tracking-wide text-muted">This skill</div>
               {editorMeters(hud.skill?.kind ?? "linear").map((m) => (
@@ -618,6 +737,25 @@ export function AbilityLab({ autoEnter = false }: { autoEnter?: boolean }) {
                     {l}
                   </button>
                 ))}
+              </div>
+              <div className="mt-3 mb-2 text-[11px] tracking-wide text-muted">Save as new skill</div>
+              <div className="mb-3 flex gap-1.5">
+                <input
+                  value={saveName}
+                  onChange={(e) => setSaveName(e.target.value)}
+                  placeholder="Name"
+                  className="min-w-0 flex-1 rounded-lg border border-border bg-transparent px-2 py-1.5 text-sm text-fg"
+                />
+                <button
+                  type="button"
+                  className="rounded-lg bg-gold px-3 py-1.5 text-xs font-semibold text-bg"
+                  onClick={() => {
+                    engineRef.current?.saveNamedSkill(saveName);
+                    setSaveName("");
+                  }}
+                >
+                  Save
+                </button>
               </div>
               <button
                 type="button"

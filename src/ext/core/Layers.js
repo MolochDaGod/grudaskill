@@ -35,6 +35,5 @@ export function enableMainCameraLayers(camera) {
   if (!camera?.layers) return camera;
   camera.layers.enable(LAYER.WORLD);
   camera.layers.enable(LAYER.VFX);
-  camera.layers.enable(LAYER.CONTACT);
   return camera;
 }

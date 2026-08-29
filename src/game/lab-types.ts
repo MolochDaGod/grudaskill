@@ -46,8 +46,11 @@ export type HudState = {
   kitMode: KitMode;
   bendElement: string;
   tunes: TuneRow[];
+  shaders: { id: string; name: string; swatch: string }[];
+  shaderColors: { key: string; label: string; value: string }[];
   weather: WeatherId;
   activeMode: boolean;
+  animIntensity: number;
   hour: number;
   clock: string;
   period: string;
@@ -60,6 +63,10 @@ export type HudState = {
   markX: number;
   markY: number;
   markHard: boolean;
+  bowDraw: number;
+  bowZone: "" | "miss" | "likely" | "hit" | "best";
+  staffStars: { id: number; lit: boolean; x: number; y: number }[];
+  staffCast: number;
   pad: string;
   gpuOn: boolean;
   gpu: {
@@ -110,11 +117,17 @@ export type LabEngine = {
   castCurrent(): void;
   patchActive(patch: Partial<SkillDef>): void;
   patchTune(block: string, key: string, source: "ext" | "bend" | "lin" | "sam", value: number): void;
+  applyShader(id: string): void;
+  writeShaderColor(key: string, hex: string): void;
+  resetShader(): void;
+  saveNamedSkill(name: string): void;
+  clickStaffStar(id: number): void;
   castBending(): void;
   importAsset(file: File): Promise<void>;
   applyVfx(id: string): void;
   armBind(): void;
   bindToSlot(code: string): void;
+  releaseCurrent(): void;
   setWeather(id: WeatherId): void;
   toggleActiveMode(): void;
   setHour(hour: number): void;
@@ -124,4 +137,5 @@ export type LabEngine = {
   setCamStyle(style: "tight" | "normal" | "wide"): void;
   setInvertY(on: boolean): void;
   setCrosshair(on: boolean): void;
+  setAnimIntensity(v: number): void;
 };

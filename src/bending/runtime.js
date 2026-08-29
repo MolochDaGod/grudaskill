@@ -77,15 +77,50 @@ export class BendingRuntime {
     this.aim.set(origin, target, dt);
   }
 
+  /** Linear volume from barrel UUID to impact — original trail + onImpact. */
+  castFrom(origin, target) {
+    const a = origin.clone();
+    const b = target.clone();
+    if (a.distanceTo(b) < 4) {
+      const dir = b.clone().sub(a);
+      if (dir.lengthSq() < 1e-8) dir.set(0, 0, -1);
+      dir.normalize();
+      b.copy(a).addScaledVector(dir, 14);
+    }
+    const p1 = a.clone().lerp(b, 0.33);
+    const p2 = a.clone().lerp(b, 0.66);
+    const curve = new CatmullRomCurve3([a, p1, p2, b], false, "catmullrom", 0);
+    curve.arcLengthDivisions = 64;
+    this.abilities.select(this.element);
+    const ability = this.abilities.cast(curve, this.element);
+    this.lastUuid = ability?.group?.uuid ?? null;
+    return !!ability;
+  }
+
   /** Straight ground path from caster to the circle. Real GLSL travels it. */
   castLinear() {
     const pts = this.aim.linePoints();
-    if (pts[0].distanceTo(pts[3]) < 4) return false;
+    const a = pts[0];
+    const b = pts[3];
+    const span = a.distanceTo(b);
+    if (span < 12) {
+      const dir = b.clone().sub(a);
+      if (dir.lengthSq() < 1e-8) dir.set(0, 0, -1);
+      dir.normalize();
+      b.copy(a).addScaledVector(dir, 14);
+      pts[1].lerpVectors(a, b, 0.33);
+      pts[2].lerpVectors(a, b, 0.66);
+    }
     const curve = new CatmullRomCurve3(pts, false, "catmullrom", 0);
     curve.arcLengthDivisions = 64;
     this.abilities.select(this.element);
-    this.abilities.cast(curve, this.element);
-    return true;
+    const ability = this.abilities.cast(curve, this.element);
+    this.lastUuid = ability?.group?.uuid ?? null;
+    return !!ability;
+  }
+
+  live() {
+    return this.abilities?.active?.length ?? 0;
   }
 
   update(dt, width, height) {

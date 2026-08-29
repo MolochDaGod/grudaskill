@@ -16,7 +16,7 @@ export class CameraFeel {
   roll = 0;
 
   punch(amount: number, decay = 1.7, freq = 22) {
-    this.trauma = Math.min(0.55, this.trauma + amount);
+    this.trauma = Math.min(0.28, this.trauma + amount);
     this.decay = decay;
     this.freq = freq;
   }
@@ -34,8 +34,8 @@ export class CameraFeel {
     const nx = Math.sin(t) * 0.62 + Math.sin(t * 2.31 + 1.7) * 0.38;
     const ny = Math.sin(t * 1.37 + 4.2) * 0.62 + Math.sin(t * 2.79 + 0.3) * 0.38;
     const nz = Math.sin(t * 0.83 + 2.9) * 0.62 + Math.sin(t * 3.11 + 5.1) * 0.38;
-    this.offset.set(nx, ny * 0.65, nz).multiplyScalar(shake * 0.22);
-    this.roll = nz * shake * 0.014;
+    this.offset.set(nx, ny * 0.65, nz).multiplyScalar(shake * 0.1);
+    this.roll = nz * shake * 0.008;
     this.trauma = Math.max(0, this.trauma - this.decay * dt);
   }
 

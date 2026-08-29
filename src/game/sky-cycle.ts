@@ -250,6 +250,7 @@ export class SkyCycle {
     this.stars = new THREE.Points(geo, this.starMat);
     this.stars.frustumCulled = false;
     this.stars.renderOrder = -2;
+    this.stars.name = "lab-stars";
     scene.add(this.stars);
 
     this.glowMat = new THREE.SpriteMaterial({
@@ -262,6 +263,7 @@ export class SkyCycle {
     this.glow = new THREE.Sprite(this.glowMat);
     this.glow.scale.setScalar(28);
     this.glow.frustumCulled = false;
+    this.glow.name = "lab-glow";
     scene.add(this.glow);
   }
 

@@ -21,7 +21,7 @@ export function bootRapier(): Promise<void> {
 
 export function wasmHeapBytes(): number {
   try {
-    const buf = RAPIER.scratchBuffer?.buffer;
+    const buf = (RAPIER as unknown as { scratchBuffer?: { buffer?: ArrayBuffer } }).scratchBuffer?.buffer;
     return buf ? buf.byteLength : 0;
   } catch {
     return 0;

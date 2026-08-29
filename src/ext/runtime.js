@@ -165,9 +165,16 @@ export class ExtRuntime {
 
   confirm() {
     if (!this.aim.isArmed) this.aim.arm();
-    this.aim.setOrigin(this.player.position);
+    this.aim.setOrigin(this.castOrigin ?? this.player.position);
     this.aim.update(0);
-    return this.aim.confirm();
+    const ok = this.aim.confirm();
+    const last = this.abilities.active[this.abilities.active.length - 1];
+    this.lastUuid = last?.group?.uuid ?? null;
+    return ok;
+  }
+
+  live() {
+    return this.abilities?.active?.length ?? 0;
   }
 
   setCastOrigin(pos) {

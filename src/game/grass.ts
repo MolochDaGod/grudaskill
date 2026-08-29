@@ -4,11 +4,11 @@ import type { WeatherId } from "./weather";
 
 /** One InstancedMesh of tufts (merged blades) — Three.js cannot nest instances. */
 const MAX_PLAYERS = 6;
-const TUFT_COUNT = 720;
-const TUFT_BLADES = 7;
-const PATCH_RADIUS = 10;
-const BLADE_H = 0.34;
-const BLADE_W = 0.028;
+const TUFT_COUNT = 280;
+const TUFT_BLADES = 3;
+const PATCH_RADIUS = 8.5;
+const BLADE_H = 0.24;
+const BLADE_W = 0.022;
 
 const VERT = /* glsl */ `
 uniform float time;
@@ -92,7 +92,7 @@ export class GrassField {
   private slots: THREE.Vector3[];
   private time = 0;
 
-  constructor(scene: THREE.Scene) {
+  constructor(scene: THREE.Object3D) {
     this.slots = Array.from({ length: MAX_PLAYERS }, () => new THREE.Vector3(1e6, 1e6, 1e6));
     this.material = new THREE.ShaderMaterial({
       name: "GrassTuft",
@@ -131,6 +131,7 @@ export class GrassField {
     this.mesh.instanceMatrix.needsUpdate = true;
     if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
     this.mesh.computeBoundingSphere();
+    this.mesh.name = "lab-grass";
     scene.add(this.mesh);
   }
 

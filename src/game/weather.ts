@@ -205,14 +205,17 @@ export class WeatherSystem {
     this.scene = scene;
     this.pmrem = new THREE.PMREMGenerator(renderer);
     this.sky = new Sky();
-    this.sky.scale.setScalar(4000);
+    this.sky.name = "lab-sky";
+    this.sky.scale.setScalar(45000);
     this.sky.frustumCulled = false;
     this.sky.renderOrder = -10;
     scene.add(this.sky);
 
-    this.hemi = new THREE.HemisphereLight(0xb8d8ff, 0x3a2a18, 0.72);
+    this.hemi = new THREE.HemisphereLight(0xb8d8ff, 0x3a2a18, 0.48);
+    this.hemi.name = "lab-hemi";
     scene.add(this.hemi);
-    this.sun = new THREE.DirectionalLight(0xfff1cc, 1.35);
+    this.sun = new THREE.DirectionalLight(0xfff1cc, 1.05);
+    this.sun.name = "lab-sun";
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(1024, 1024);
     this.sun.shadow.camera.near = 1;
@@ -246,10 +249,10 @@ export class WeatherSystem {
     );
     this.precip.frustumCulled = false;
     this.precip.visible = false;
+    this.precip.name = "lab-precip";
     scene.add(this.precip);
     this.cycle = new SkyCycle(scene);
     this.set("sunny");
-    this.bakeEnv();
   }
 
   get hour() {
@@ -290,13 +293,11 @@ export class WeatherSystem {
     this.precip.visible = p.flakes > 0;
     this.scatter(p.flakes);
     this.applySun(hourToSun(p.hour), p);
-    this.bakeEnv();
   }
 
   setHour(hour: number) {
     this.cycle.setHour(hour);
     this.applySun(hourToSun(this.cycle.hour), PRESET[this.id]);
-    this.bakeEnv();
   }
 
   setTimeScale(scale: number) {
@@ -325,8 +326,6 @@ export class WeatherSystem {
     );
     const info = this.cycle.update(dt, origin, _sun, p.cloudCoverage, _cloud);
     this.applySun(info, p);
-    this.envAge += dt;
-    if (this.cycle.timeScale > 0 && this.envAge > 2.4) this.bakeEnv();
     if (this.id === "storm") {
       this.flash -= dt;
       if (this.flash <= 0 && Math.random() < dt * 0.35) this.flash = 0.12 + Math.random() * 0.1;
@@ -403,15 +402,7 @@ export class WeatherSystem {
 
   private bakeEnv() {
     this.envAge = 0;
-    const probe = new THREE.Scene();
-    const parent = this.sky.parent;
-    probe.add(this.sky);
-    const rt = this.pmrem.fromScene(probe, 0, 0.1, 2000);
-    parent?.add(this.sky);
-    this.envRT?.dispose();
-    this.envRT = rt;
-    this.scene.environment = rt.texture;
-    this.scene.environmentIntensity = 0.85;
+    this.scene.environment = null;
   }
 
   private placeSun(elevation: number, azimuth: number) {

@@ -2,6 +2,7 @@ import * as THREE from "three";
 import type { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import type { ProjectileAsset } from "./skills";
 import { ASSETS_URL, viaR2 } from "./cdn";
+import { enqueueShot, makeAnimQueue, releaseShot, takeShot, type AnimQueue } from "./anim-queue";
 
 export const GRUDGE6_RACES = [
   { id: "human", name: "Human", prefix: "WK_" },
@@ -19,8 +20,8 @@ export function raceGlbUrl(id: string): string {
 }
 
 const ANIM_BASE = `${ASSETS_URL}/models/grudge6/anims`;
-export const BIP001_LOCO = ["idle", "walk", "run"] as const;
-export const BIP001_SHOTS = ["attack", "cast"] as const;
+export const BIP001_LOCO = ["idle", "idle2", "idle_look", "walk", "run"] as const;
+export const BIP001_SHOTS = ["attack", "cast", "slash", "shoot", "bow", "staff", "spear", "gun", "fire", "magic"] as const;
 
 function prefixFor(raceId?: string): string {
   return GRUDGE6_RACES.find((r) => r.id === raceId)?.prefix ?? "WK_";
@@ -127,6 +128,13 @@ export function weaponMuzzleWorld(
   _wbox.setFromObject(mesh);
   if (_wbox.isEmpty()) return null;
   _wbox.getCenter(_wcenter);
+  const tag = `${mesh.name} ${mesh.parent?.name ?? ""}`.toLowerCase();
+  const bow = /bow|crossbow/.test(tag);
+  if (bow) {
+    out.copy(_wcenter);
+    if (out.y < 0.4) out.y = Math.max(0.95, _wcenter.y);
+    return out;
+  }
   _wfwd.copy(forward);
   if (_wfwd.lengthSq() < 1e-8) _wfwd.set(0, 0, 1);
   else _wfwd.normalize();
@@ -408,7 +416,7 @@ export function loadBip001Packs(loader: GLTFLoader): Promise<Record<string, THRE
         return null;
       }
     }),
-  ).then((pairs) => Object.fromEntries(pairs.filter((p): p is readonly [string, THREE.AnimationClip] => !!p)));
+  ).then((pairs) => Object.fromEntries(pairs.filter((p) => p != null)));
   return packCache;
 }
 
@@ -421,6 +429,9 @@ export type ToonRig = {
   mixer: THREE.AnimationMixer | null;
   actions: Record<string, THREE.AnimationAction>;
   overlay: string | null;
+  queue: AnimQueue;
+  idleName: string;
+  intensity: number;
 };
 
 const BONE_PAIRS: [string[], string[]][] = [
@@ -462,6 +473,26 @@ export function writeToonBoneSegments(
   return n;
 }
 
+const IDLE_NAMES = ["idle", "idle2", "idle_look"] as const;
+
+function isIdleName(name: string) {
+  return name === "idle" || name === "idle2" || name === "idle_look" || name === "walk" || name === "run";
+}
+
+export function restIdle(rig: ToonRig) {
+  const names = IDLE_NAMES.filter((n) => rig.actions[n]);
+  if (!names.length) return;
+  const pick = names[Math.floor(Math.random() * names.length)]!;
+  for (const n of names) {
+    const a = rig.actions[n];
+    if (!a) continue;
+    a.enabled = true;
+    if (!a.isRunning()) a.play();
+    a.setEffectiveWeight(n === pick ? 1 : 0);
+  }
+  rig.idleName = pick;
+}
+
 export function bindMixer(rig: ToonRig, clips: Record<string, THREE.AnimationClip>) {
   if (rig.mixer) rig.mixer.stopAllAction();
   const target = rig.root.children[0] ?? rig.root;
@@ -469,32 +500,45 @@ export function bindMixer(rig: ToonRig, clips: Record<string, THREE.AnimationCli
   const actions: Record<string, THREE.AnimationAction> = {};
   for (const [name, clip] of Object.entries(clips)) {
     const action = mixer.clipAction(clip);
-    if (name === "idle" || name === "walk" || name === "run") {
+    if (isIdleName(name)) {
       action.setLoop(THREE.LoopRepeat, Infinity);
       action.enabled = true;
       action.setEffectiveWeight(name === "idle" ? 1 : 0);
       action.play();
     } else {
       action.setLoop(THREE.LoopOnce, 1);
-      action.clampWhenFinished = true;
+      action.clampWhenFinished = false;
       action.enabled = false;
       action.setEffectiveWeight(0);
     }
     actions[name] = action;
   }
+  mixer.addEventListener("finished", (ev) => {
+    const act = ev.action as THREE.AnimationAction | undefined;
+    if (!act || !rig.overlay) return;
+    if (rig.actions[rig.overlay] !== act) return;
+    act.fadeOut(0.18);
+    releaseShot(rig.queue, rig.overlay);
+    rig.overlay = null;
+    restIdle(rig);
+  });
   rig.mixer = mixer;
   rig.actions = actions;
+  rig.idleName = "idle";
 }
 
 export function tickMixer(
   rig: ToonRig,
   dt: number,
   speed: number,
-  overlay: "attack" | "cast" | null,
+  overlay: string | null,
   hold = false,
 ) {
   if (!rig.mixer) return;
-  const idle = rig.actions.idle;
+  if (!rig.queue) rig.queue = makeAnimQueue();
+  if (overlay) enqueueShot(rig.queue, overlay);
+  const start = takeShot(rig.queue);
+  const idle = rig.actions[rig.idleName] ?? rig.actions.idle;
   const walk = rig.actions.walk;
   const run = rig.actions.run;
   const runT = 6.2;
@@ -510,35 +554,39 @@ export function tickMixer(
     wWalk = k;
     wIdle = 1 - k;
   }
-  if (overlay) {
-    const shot = rig.actions[overlay];
+  const intensity = THREE.MathUtils.clamp(rig.intensity || 1, 0.45, 1.6);
+  if (start) {
+    const shot = rig.actions[start] ?? rig.actions.attack ?? rig.actions.cast;
     if (shot) {
       shot.enabled = true;
       shot.reset();
-      shot.setEffectiveWeight(1);
-      shot.setEffectiveTimeScale(1);
+      shot.setEffectiveWeight(THREE.MathUtils.clamp(0.75 * intensity, 0.45, 1));
+      shot.setEffectiveTimeScale(intensity);
       shot.paused = false;
       shot.play();
       if (hold) {
-        shot.time = Math.min(0.16, shot.getClip().duration * 0.28);
+        shot.time = Math.min(0.12, shot.getClip().duration * 0.18);
         shot.paused = true;
       }
-      rig.overlay = overlay;
-    }
-  }
-  if (rig.overlay && !hold) {
-    const shot = rig.actions[rig.overlay];
-    const clip = shot?.getClip();
-    if (shot && clip && shot.time >= clip.duration - 0.04) {
-      shot.fadeOut(0.1);
-      shot.setEffectiveWeight(0);
-      rig.overlay = null;
+      rig.overlay = start;
+    } else {
+      releaseShot(rig.queue, start);
     }
   }
   const busy = !!rig.overlay;
-  idle?.setEffectiveWeight(busy ? wIdle * 0.2 : wIdle);
-  walk?.setEffectiveWeight(busy ? wWalk * 0.2 : wWalk);
-  run?.setEffectiveWeight(busy ? wRun * 0.2 : wRun);
+  idle?.setEffectiveWeight(busy ? wIdle * 0.15 : wIdle);
+  walk?.setEffectiveWeight(busy ? wWalk * 0.15 : wWalk);
+  run?.setEffectiveWeight(busy ? wRun * 0.15 : wRun);
+  if (walk && wWalk > 0 && !walk.isRunning()) walk.play();
+  if (run && wRun > 0 && !run.isRunning()) run.play();
+  if (idle && wIdle > 0 && !idle.isRunning()) idle.play();
+  if (!busy && speed <= walkT) {
+    for (const n of IDLE_NAMES) {
+      const a = rig.actions[n];
+      if (!a || n === (rig.idleName || "idle")) continue;
+      a.setEffectiveWeight(0);
+    }
+  }
   rig.mixer.update(dt);
 }
 
@@ -568,6 +616,9 @@ export function preparePlayKit(
     mixer: null,
     actions: {},
     overlay: null,
+    queue: makeAnimQueue(),
+    idleName: "idle",
+    intensity: 1,
   };
   if (opts.clips) bindMixer(rig, opts.clips);
   return rig;
