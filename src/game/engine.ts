@@ -36,9 +36,12 @@ import { dummyCapsule, shotRadius, sphereHitsCapsule, sweptSphereHitsCapsule } f
 import {
   createSlashPool,
   isFlyingSlash,
+  meleeReach,
+  offsetSlashDir,
   orientSlash,
   restyleSlash,
   slashLaunch,
+  tickSlash,
   weaponSwingProfile,
   type FlyingSlash,
 } from "./slash";
@@ -90,6 +93,7 @@ type Shot = {
   pierce: number;
   path: PathKind;
   ignore: Set<number>;
+  clash: Set<string>;
   slot: number;
   mesh: THREE.Object3D;
   trail: THREE.Line;
@@ -1177,6 +1181,7 @@ export class LabEngine {
         pierce: 0,
         path: "straight",
         ignore: new Set(),
+        clash: new Set(),
         slot: i,
         mesh,
         trail,
@@ -1662,6 +1667,7 @@ export class LabEngine {
     shot.pierce = skill.pierce ?? 0;
     shot.path = skill.path ?? "straight";
     shot.ignore = new Set();
+    shot.clash = new Set();
     shot.mesh.visible = true;
     shot.trail.visible = true;
     (shot.trail.material as THREE.LineBasicMaterial).color.set(skill.color);
@@ -2044,6 +2050,10 @@ export class LabEngine {
       shot.mesh.position.copy(shot.pos);
       this.orientAlong(shot.mesh, shot.dir);
       this.physics.syncShot(shot.slot, shot.pos.x, shot.pos.y, shot.pos.z);
+      if (this.resolveVolumeClash("shot", shot.slot, shot.pos, shot.dir, shot.skill, shot.age, shot.clash)) {
+        this.killShot(shot);
+        continue;
+      }
       for (let i = 15; i >= 3; i--) shot.trailPts[i] = shot.trailPts[i - 3]!;
       shot.trailPts[0] = shot.pos.x;
       shot.trailPts[1] = shot.pos.y;
@@ -2203,25 +2213,26 @@ export class LabEngine {
       s.age += dt;
       s.life -= dt;
       s.pos.addScaledVector(s.dir, s.speed * dt);
-      s.flameMat.uniforms.uTime!.value = s.age;
-      s.coreMat.uniforms.uTime!.value = s.age;
-      const life = Math.max(0, Math.min(1, s.life));
-      s.flameMat.uniforms.uLife!.value = life;
-      s.coreMat.uniforms.uLife!.value = life;
+      tickSlash(s, dt);
       orientSlash(s);
       this.physics.syncSlash(s);
-      this.sparks.trail(s.pos, s.dir, s.skill.color, 0.75);
+      this.sparks.trail(s.pos, s.dir, s.skill.color, 0.7);
+      if (this.resolveVolumeClash("slash", s.slot, s.pos, s.dir, s.skill, s.age, s.clash)) {
+        this.impact(s.pos, s.skill);
+        this.killSlash(s);
+        continue;
+      }
       const rapierHits = this.physics.hits(s);
       _v.copy(s.pos).addScaledVector(s.dir, -s.speed * dt);
       for (let di = 0; di < this.dummies.length; di++) {
         if (s.ignore.has(di)) continue;
         const d = this.dummies[di]!;
         const cap = dummyCapsule(d.group.position.x, d.group.position.z);
-        if (rapierHits.includes(di) || sweptSphereHitsCapsule(_v, s.pos, 0.5, cap) || sphereHitsCapsule(s.pos, 0.5, cap)) {
+        if (rapierHits.includes(di) || sweptSphereHitsCapsule(_v, s.pos, 0.55, cap) || sphereHitsCapsule(s.pos, 0.55, cap)) {
           this.hitDummy(d, s.skill, s.dir);
+          this.impact(s.pos, s.skill);
           s.ignore.add(di);
           s.pierce -= 1;
-          this.sparks.burst(s.pos, s.skill.color, 18, 5, 1.2);
           if (s.pierce < 0) {
             this.killSlash(s);
             break;
@@ -2233,26 +2244,129 @@ export class LabEngine {
   }
 
   private launchSlash(skill: SkillDef) {
-    const slot = this.slashes.find((s) => !s.active);
-    if (!slot) return;
     const profile = weaponSwingProfile(skill.asset);
     const launched = slashLaunch(this.handNow, this.handPrev, this.aimPoint, this.player.position, profile);
-    restyleSlash(slot, skill);
-    slot.active = true;
-    slot.skill = skill;
-    slot.pos.copy(launched.pos);
-    slot.dir.copy(launched.dir);
-    slot.speed = skill.speed;
-    slot.life = 1.4;
-    slot.age = 0;
-    slot.pierce = Math.max(1, skill.pierce || 4);
-    slot.ignore = new Set();
-    slot.mesh.visible = true;
-    orientSlash(slot);
-    this.physics.attachSlash(slot);
-    this.sparks.burst(slot.pos, skill.color, 16, 4, 0.8);
+    this.meleeCleave(skill, launched.dir);
+    const n = Math.max(1, Math.min(3, skill.count || 1));
+    const spread = n === 1 ? [0] : n === 2 ? [-0.12, 0.12] : [-0.18, 0, 0.18];
+    for (const yaw of spread) {
+      const slot = this.slashes.find((s) => !s.active);
+      if (!slot) break;
+      restyleSlash(slot, skill);
+      slot.active = true;
+      slot.skill = skill;
+      slot.pos.copy(launched.pos);
+      slot.dir.copy(offsetSlashDir(launched.dir, yaw));
+      slot.speed = Math.max(18, skill.speed);
+      slot.life = 0.85 + skill.length * 0.12;
+      slot.age = 0;
+      slot.pierce = Math.max(2, skill.pierce || 3);
+      slot.ignore = new Set();
+      slot.clash = new Set();
+      slot.mesh.visible = true;
+      orientSlash(slot);
+      this.physics.attachSlash(slot);
+    }
+    this.sparks.burst(launched.pos, skill.color, 22, 6, 1.1);
     this.punchCast(skill);
-    this.hint = `${skill.name} flying slash`;
+    this.hint = n > 1 ? `${skill.name} · ${n} flying cuts` : `${skill.name} screaming slash`;
+  }
+
+  /** Blade itself — anyone in reach and in front is cut as the wave leaves the steel. */
+  private meleeCleave(skill: SkillDef, dir: THREE.Vector3) {
+    const reach = meleeReach(skill);
+    const origin = this.player.position;
+    for (let i = 0; i < this.dummies.length; i++) {
+      const d = this.dummies[i]!;
+      const dx = d.group.position.x - origin.x;
+      const dz = d.group.position.z - origin.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist > reach || dist < 0.15) continue;
+      _v.set(dx, 0, dz);
+      if (_v.lengthSq() < 1e-6) continue;
+      _v.normalize();
+      if (_v.dot(dir) < 0.25) continue;
+      this.hitDummy(d, skill, dir);
+      this.impact(d.group.position, skill);
+    }
+  }
+
+  private clashKey(kind: "slash" | "shot", index: number) {
+    return `${kind}:${index}`;
+  }
+
+  /** Hitbox ∩ hitbox. Returns true if this volume should die. */
+  private resolveVolumeClash(
+    kind: "slash" | "shot",
+    index: number,
+    pos: THREE.Vector3,
+    dir: THREE.Vector3,
+    skill: SkillDef,
+    age: number,
+    clash: Set<string>,
+  ): boolean {
+    if (age < 0.12) return false;
+    const hits = kind === "slash" ? this.physics.overlaps(this.slashes[index]!) : this.physics.shotOverlaps(index);
+    for (const hit of hits) {
+      if (hit.kind === "dummy") continue;
+      if (hit.kind === kind && hit.index === index) continue;
+      const otherKey = this.clashKey(hit.kind, hit.index);
+      if (clash.has(otherKey)) continue;
+      let otherPos: THREE.Vector3 | null = null;
+      let otherDir: THREE.Vector3 | null = null;
+      let otherForce = 0;
+      let otherAge = 0;
+      let otherClash: Set<string> | null = null;
+      let killOther: (() => void) | null = null;
+      if (hit.kind === "slash") {
+        const o = this.slashes[hit.index];
+        if (!o?.active) continue;
+        otherPos = o.pos;
+        otherDir = o.dir;
+        otherForce = o.skill.force;
+        otherAge = o.age;
+        otherClash = o.clash;
+        killOther = () => this.killSlash(o);
+      } else {
+        const o = this.shots[hit.index];
+        if (!o?.active) continue;
+        otherPos = o.pos;
+        otherDir = o.dir;
+        otherForce = o.skill.force;
+        otherAge = o.age;
+        otherClash = o.clash;
+        killOther = () => this.killShot(o);
+      }
+      if (otherAge < 0.12) continue;
+      if (dir.dot(otherDir!) > 0.82 && pos.distanceToSquared(otherPos!) < 1.6) continue;
+      const selfKey = this.clashKey(kind, index);
+      clash.add(otherKey);
+      otherClash!.add(selfKey);
+      const fa = skill.force;
+      const fb = otherForce;
+      const mid = _v.copy(pos).lerp(otherPos!, 0.5);
+      this.sparks.burst(mid, skill.color, 22, 5, 1.1);
+      rumble(0.35, 0.2, 70);
+      const equal = Math.abs(fa - fb) < Math.max(5, 0.18 * Math.max(fa, fb));
+      if (equal) {
+        const n = _v2.copy(otherPos!).sub(pos);
+        n.y = 0;
+        if (n.lengthSq() < 1e-6) n.copy(dir);
+        n.normalize();
+        dir.addScaledVector(n, -2 * dir.dot(n)).normalize();
+        otherDir!.addScaledVector(n, -2 * otherDir!.dot(n)).normalize();
+        this.hint = "Clash · elastic";
+        continue;
+      }
+      if (fa > fb) {
+        killOther?.();
+        this.hint = "Clash · overwhelm";
+        continue;
+      }
+      this.hint = "Clash · stopped";
+      return true;
+    }
+    return false;
   }
 
   private killSlash(s: FlyingSlash) {

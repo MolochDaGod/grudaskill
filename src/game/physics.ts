@@ -27,9 +27,9 @@ export const GROUPS = {
     [Layer.DUMMY],
     [Layer.GROUND, Layer.PLAYER, Layer.PROJECTILE, Layer.SLASH, Layer.AOE],
   ),
-  projectile: groups([Layer.PROJECTILE], [Layer.DUMMY, Layer.AOE]),
-  slash: groups([Layer.SLASH], [Layer.DUMMY]),
-  aoe: groups([Layer.AOE], [Layer.DUMMY]),
+  projectile: groups([Layer.PROJECTILE], [Layer.DUMMY, Layer.SLASH, Layer.PROJECTILE, Layer.AOE]),
+  slash: groups([Layer.SLASH], [Layer.DUMMY, Layer.SLASH, Layer.PROJECTILE]),
+  aoe: groups([Layer.AOE], [Layer.DUMMY, Layer.PROJECTILE]),
 };
 
 /** Solver groups: physical push only. Hit volumes have empty filters (sensors). */
@@ -57,6 +57,8 @@ type ShotBody = {
   col: RAPIER.Collider;
 };
 
+export type Overlap = { kind: "dummy" | "slash" | "shot"; index: number };
+
 export class LabPhysics {
   world: RAPIER.World | null = null;
   private dummies: DummyBody[] = [];
@@ -69,6 +71,7 @@ export class LabPhysics {
   private playerCol: RAPIER.Collider | null = null;
   private controller: RAPIER.KinematicCharacterController | null = null;
   private groundCol: RAPIER.Collider | null = null;
+  private tags = new Map<number, Overlap>();
 
   async init(existing?: RAPIER.World) {
     if (existing) {
@@ -98,6 +101,7 @@ export class LabPhysics {
     this.groundCol = null;
     this.dummies = [];
     this.shots = [];
+    this.tags.clear();
     this.ensureArena();
   }
 
@@ -129,7 +133,10 @@ export class LabPhysics {
 
   resetDummies() {
     if (!this.world) return;
-    for (const d of this.dummies) this.world.removeCollider(d.collider, true);
+    for (const d of this.dummies) {
+      this.tags.delete(d.collider.handle);
+      this.world.removeCollider(d.collider, true);
+    }
     this.dummies = [];
   }
 
@@ -147,6 +154,7 @@ export class LabPhysics {
       true,
     );
     const col = this.world.createCollider(desc);
+    this.tags.set(col.handle, { kind: "dummy", index });
     this.dummies.push({ collider: col, index });
   }
 
@@ -186,6 +194,7 @@ export class LabPhysics {
       ),
       rb,
     );
+    this.tags.set(col.handle, { kind: "slash", index: slash.slot });
     slash.body = { rb, col };
   }
 
@@ -204,18 +213,38 @@ export class LabPhysics {
   releaseSlash(slash: FlyingSlash) {
     if (!this.world || !slash.body) return;
     const body = slash.body as { rb: RAPIER.RigidBody; col: RAPIER.Collider };
+    this.tags.delete(body.col.handle);
     this.world.removeCollider(body.col, true);
     this.world.removeRigidBody(body.rb);
     slash.body = null;
   }
 
+  /** Dummy indices only — kept for older call sites. */
   hits(slash: FlyingSlash): number[] {
-    const out: number[] = [];
-    if (!this.world || !slash.body) return out;
-    const col = (slash.body as { col: RAPIER.Collider }).col;
-    this.world.intersectionPairsWith(col, (other) => {
-      const dummy = this.dummies.find((d) => d.collider.handle === other.handle);
-      if (dummy && !slash.ignore.has(dummy.index)) out.push(dummy.index);
+    return this.overlaps(slash).filter((h) => h.kind === "dummy").map((h) => h.index);
+  }
+
+  overlaps(slash: FlyingSlash): Overlap[] {
+    if (!this.world || !slash.body) return [];
+    return this.pairs((slash.body as { col: RAPIER.Collider }).col);
+  }
+
+  shotOverlaps(index: number): Overlap[] {
+    const s = this.shots[index];
+    if (!this.world || !s) return [];
+    return this.pairs(s.col);
+  }
+
+  private pairs(col: RAPIER.Collider): Overlap[] {
+    const out: Overlap[] = [];
+    const seen = new Set<string>();
+    this.world?.intersectionPairsWith(col, (other) => {
+      const tag = this.tags.get(other.handle);
+      if (!tag) return;
+      const key = `${tag.kind}:${tag.index}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(tag);
     });
     return out;
   }
@@ -231,6 +260,7 @@ export class LabPhysics {
       rb,
     );
     this.shots[index] = { rb, col };
+    this.tags.set(col.handle, { kind: "shot", index });
   }
 
   syncShot(index: number, x: number, y: number, z: number) {
@@ -240,20 +270,16 @@ export class LabPhysics {
   }
 
   shotHits(index: number, ignore: Set<number>): number[] {
-    const out: number[] = [];
-    const s = this.shots[index];
-    if (!this.world || !s) return out;
-    this.world.intersectionPairsWith(s.col, (other) => {
-      const dummy = this.dummies.find((d) => d.collider.handle === other.handle);
-      if (dummy && !ignore.has(dummy.index)) out.push(dummy.index);
-    });
-    return out;
+    return this.shotOverlaps(index)
+      .filter((h) => h.kind === "dummy" && !ignore.has(h.index))
+      .map((h) => h.index);
   }
 
   releaseShot(index: number) {
     if (!this.world) return;
     const s = this.shots[index];
     if (!s) return;
+    this.tags.delete(s.col.handle);
     this.world.removeCollider(s.col, true);
     this.world.removeRigidBody(s.rb);
     delete this.shots[index];
