@@ -16,6 +16,7 @@ import {
   STAFF_CHARGE,
   STAFF_NORMAL_ATTACK
 } from '../vfx/staffOrbVfx.js';
+import { overlayForSkill } from '../vfx/stylizedProjectileOverlay.js';
 
 const CAST_CLIP = 'magic/standing 1h cast spell 01';
 
@@ -250,6 +251,7 @@ export function bindFromCatalogSkill(skill) {
     String(skill?.slotType || skill?.slotLabel || '').toLowerCase() === 'primary' ||
     /practice|bolt|spark|ping|root/.test(`${skill?.id || ''} ${skill?.name || ''}`.toLowerCase());
   const useOrb = pathMode === 'stream' || isPrimary;
+  const overlay = overlayForSkill(skill);
 
   return {
     catalogSkillId: skill.id,
@@ -282,6 +284,8 @@ export function bindFromCatalogSkill(skill) {
     useOrbProjectile: useOrb,
     projectileMeshUrl: useOrb ? staffProjectileMeshUrl(el) : null,
     chargeMeshUrl: STAFF_CHARGE.path,
+    overlay,
+    vfxRef: overlay?.vfxRef || impact,
     // Catalog text for UI/toasts — never invent effects
     description: skill.description || '',
     effects: skill.effects || [],
@@ -333,6 +337,7 @@ export function enrichStaffSkill(skill) {
   skill.useOrbProjectile = b.useOrbProjectile;
   skill.projectileMeshUrl = b.projectileMeshUrl;
   skill.chargeMeshUrl = b.chargeMeshUrl;
+  skill.overlay = skill.overlay || b.overlay;
   if (skill.range == null) skill.range = b.rangeM;
   if (skill.castTime == null) skill.castTime = b.castDuration;
 
@@ -352,7 +357,8 @@ export function enrichStaffSkill(skill) {
     travelEffectId: skill.prefab?.travelEffectId || b.travelEffectId,
     impactEffectId: skill.prefab?.impactEffectId || b.impactEffectId,
     presentation: b.presentation,
-    vfxRef: skill.prefab?.vfxRef || b.impactEffectId,
+    vfxRef: skill.prefab?.vfxRef || b.vfxRef || b.impactEffectId,
+    overlay: skill.prefab?.overlay || b.overlay,
     source: 'WEAPON_SKILLS STAFF · staffWeaponSkillsBind'
   };
   return skill;

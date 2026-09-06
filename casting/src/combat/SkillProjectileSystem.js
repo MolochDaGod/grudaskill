@@ -52,6 +52,11 @@ import {
   projectileMeshUrl,
   projectileTrailPaint
 } from '../vfx/projectileSaves.js';
+import {
+  attachOverlayToMesh,
+  overlayForSkill,
+  spawnOverlayHit
+} from '../vfx/stylizedProjectileOverlay.js';
 
 const _v = new Vector3();
 const _box = new Box3();
@@ -243,6 +248,13 @@ export class SkillProjectileSystem {
     mesh.position.copy(origin);
     this.scene.add(mesh);
 
+    const overlay = opts.overlay || overlayForSkill(opts.skill);
+    if (overlay) {
+      attachOverlayToMesh(mesh, overlay, opts.color).then((bits) => {
+        mesh.userData.styTrail = bits.trail || null;
+      }).catch(() => {});
+    }
+
     const vel = forward.clone().multiplyScalar(speed);
     // Drop shots (over target): aim velocity toward target, not only forward
     if (opts.gravity && opts.gravity < 0) {
@@ -267,7 +279,8 @@ export class SkillProjectileSystem {
       element: opts.element || 'arcane',
       explodeOnHit: opts.explodeOnHit !== false,
       targets: opts.targets || [],
-      hit: false
+      hit: false,
+      overlay
     };
     this._live.push(proj);
     this._attachTail(proj, opts);
@@ -1155,6 +1168,8 @@ export class SkillProjectileSystem {
       // Integrate
       p.vel.y += (p.gravity || 0) * dt;
       p.mesh.position.addScaledVector(p.vel, dt);
+      const sty = p.mesh?.userData?.styTrail?.material?.map;
+      if (sty) sty.offset.x -= dt * 2.6;
       // Face velocity
       if (p.vel.lengthSq() > 1e-4 && p.kind !== 'bubble') {
         p.mesh.lookAt(p.mesh.position.clone().add(p.vel));
@@ -1329,6 +1344,7 @@ export class SkillProjectileSystem {
   _explode(p) {
     const at = p.mesh.position.clone();
     const fwd = p.vel.lengthSq() > 1e-4 ? p.vel.clone().normalize() : new Vector3(0, 0, 1);
+    if (p.overlay) spawnOverlayHit(this.scene, at, p.overlay, p.element);
     if (p.mist || p.kind === 'magic') {
       const id =
         p.element === 'fire'

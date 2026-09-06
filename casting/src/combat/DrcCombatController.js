@@ -1073,6 +1073,7 @@ export class DrcCombatController {
           explodeOnHit: phys.explodeOnHit !== false,
           useOrbMaterials: true,
           trail: enriched.trail,
+          overlay: enriched.overlay,
           skill: enriched
         });
       };

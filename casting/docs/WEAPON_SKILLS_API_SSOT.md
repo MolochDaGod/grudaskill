@@ -16,7 +16,9 @@ Docs hub: https://info.grudge-studio.com/docs
 | **T0 starter 3-slot skills** | `GET …/api/v1/t0-weapons.json` | `weapons[].weaponSkills.slot1 / slot2 / slot3Options` — **Practice Slash, Guard Stance, Quick Thrust, Wide Sweep** for `t0-sword` |
 | **All weapon skills (268)** | `GET …/api/v1/master-weaponSkills.json` | v3.1 · by weapon type · slots · damage · CD · cast · effects · prefab |
 | **Prefab ↔ skill ids** | `GET …/api/v1/master-weapon-prefabs.json` | mesh/icon + skill slot ids for equip |
-| **Older skills dump** | `GET …/api/v1/weaponSkills.json` | docs list; prefer **master-weaponSkills** + **t0-weapons** |
+| **3D VFX overlay** | `GET …/api/v1/stylized-projectiles.json` | `VFX-STY-*` trail/head/hit — bind `prefab.vfxRef`. Orbs stay `orb-*.glb` |
+| **VFX GLB meshes** | `GET …/api/v1/vfx-production-glb.json` | Production explosion/lightning/orb GLBs |
+| **Do not use** | `GET …/api/v1/weaponSkills.json` | archived stub — **not** play catalog |
 
 **Hosts (same JSON, CORS):**
 
@@ -68,6 +70,7 @@ Lab must **not** invent a 4th catalog skill; keys 1–3 only for T0.
 | `range` `null` | melee default range only if style melee |
 | `effects[]` | buff parse / residual hints |
 | `resourceCost` | mana / stamina |
+| `prefab.vfxRef` | `VFX-*` overlay (stylized-projectiles) or catalog effect id |
 | `prefab` / `animation` | optional VFX / clip when present |
 
 ---
