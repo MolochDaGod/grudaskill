@@ -357,7 +357,8 @@ export function enrichStaffSkill(skill) {
     travelEffectId: skill.prefab?.travelEffectId || b.travelEffectId,
     impactEffectId: skill.prefab?.impactEffectId || b.impactEffectId,
     presentation: b.presentation,
-    vfxRef: skill.prefab?.vfxRef || b.vfxRef || b.impactEffectId,
+    vfxRef: skill.prefab?.vfxRef || b.impactEffectId,
+    overlayRef: skill.prefab?.overlayRef || b.overlay?.vfxRef,
     overlay: skill.prefab?.overlay || b.overlay,
     source: 'WEAPON_SKILLS STAFF · staffWeaponSkillsBind'
   };

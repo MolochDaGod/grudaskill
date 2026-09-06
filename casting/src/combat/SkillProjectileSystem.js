@@ -1170,6 +1170,8 @@ export class SkillProjectileSystem {
       p.mesh.position.addScaledVector(p.vel, dt);
       const sty = p.mesh?.userData?.styTrail?.material?.map;
       if (sty) sty.offset.x -= dt * 2.6;
+      const head = p.mesh?.getObjectByName?.('sty-head');
+      if (head?.userData?.spin && head.material) head.material.rotation += dt * head.userData.spin;
       // Face velocity
       if (p.vel.lengthSq() > 1e-4 && p.kind !== 'bubble') {
         p.mesh.lookAt(p.mesh.position.clone().add(p.vel));

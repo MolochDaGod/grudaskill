@@ -17,44 +17,116 @@ import {
 
 export const STYLIZED_VFX_BASE = './models/vfx/stylized-projectiles';
 
+const LOOKS = Object.freeze({
+  card: { id: 'styproj.card', vfxRef: 'VFX-STY-CARD', head: 'Card01.png', trail: 'Trail01.png', hit: 'Glow01.png', muzzle: 'Flash01.png', spin: 5, headSize: 0.72, trailLen: 1.7, trailWidth: 0.32 },
+  shadow: { id: 'styproj.shadow', vfxRef: 'VFX-STY-SHADOW', head: 'Mask01.png', trail: 'Trail08.png', hit: 'Smoke_3.png', muzzle: 'Flare01.png', spin: 0, headSize: 0.82, trailLen: 2.0, trailWidth: 0.36 },
+  triangle: { id: 'styproj.triangle', vfxRef: 'VFX-STY-TRIANGLE', head: 'Shape01.png', trail: 'Trail04.png', hit: 'Flash01.png', muzzle: 'Flash01.png', spin: 10, headSize: 0.5, trailLen: 1.55, trailWidth: 0.24 },
+  heart: { id: 'styproj.heart', vfxRef: 'VFX-STY-HEART', head: 'Glow01.png', trail: 'Trail07.png', hit: 'Flare01.png', muzzle: 'Glow01.png', spin: 1.2, headSize: 0.78, trailLen: 1.8, trailWidth: 0.34 },
+  leaf: { id: 'styproj.leaf', vfxRef: 'VFX-STY-LEAF', head: 'Leaf_1.png', trail: 'Trail06.png', hit: 'Smoke_3.png', muzzle: 'Flare01.png', spin: 7, headSize: 0.58, trailLen: 1.7, trailWidth: 0.28 },
+  diamond: { id: 'styproj.diamond', vfxRef: 'VFX-STY-DIAMOND', head: 'Shape02.png', trail: 'Trail02.png', hit: 'Snowflakes_1.png', muzzle: 'Glow01.png', spin: 12, headSize: 0.52, trailLen: 1.85, trailWidth: 0.26 },
+  diamond2: { id: 'styproj.diamond2', vfxRef: 'VFX-STY-DIAMOND2', head: 'Shape02-hollow.png', trail: 'Trail05.png', hit: 'Snow.png', muzzle: 'Glow01.png', spin: 9, headSize: 0.62, trailLen: 1.6, trailWidth: 0.3 },
+  angelic: { id: 'styproj.angelic', vfxRef: 'VFX-STY-ANGELIC', head: 'Flare01.png', trail: 'Trail09.png', hit: 'Glow01.png', muzzle: 'Flare01.png', spin: 2, headSize: 0.88, trailLen: 2.0, trailWidth: 0.38 },
+  laser: { id: 'styproj.laser', vfxRef: 'VFX-STY-LASER', head: 'Thin01.png', trail: 'Trail01.png', hit: 'Flash01.png', muzzle: 'Flash01.png', spin: 0, headSize: 0.38, trailLen: 2.45, trailWidth: 0.16 },
+  laser2: { id: 'styproj.laser2', vfxRef: 'VFX-STY-LASER2', head: 'Thin02.png', trail: 'Trail02.png', hit: 'Lightning01.png', muzzle: 'Flash01.png', spin: 0, headSize: 0.34, trailLen: 2.6, trailWidth: 0.14 },
+  dagger: { id: 'styproj.dagger', vfxRef: 'VFX-STY-DAGGER', head: 'Dagger.png', trail: 'Trail04.png', hit: 'Slash01.png', muzzle: 'Flash01.png', spin: 14, headSize: 0.48, trailLen: 1.45, trailWidth: 0.2 },
+  dagger2: { id: 'styproj.dagger2', vfxRef: 'VFX-STY-DAGGER2', head: 'Dagger.png', trail: 'Trail08.png', hit: 'Slash02.png', muzzle: 'Flash01.png', spin: 16, headSize: 0.48, trailLen: 1.55, trailWidth: 0.2 },
+  frost: { id: 'styproj.frost', vfxRef: 'VFX-STY-FROST', head: 'Snowflakes_1.png', trail: 'Trail05.png', hit: 'Glow01.png', muzzle: 'Glow01.png', spin: 3, headSize: 0.74, trailLen: 1.75, trailWidth: 0.32 },
+  flower: { id: 'styproj.flower', vfxRef: 'VFX-STY-FLOWER', head: 'Flower.png', trail: 'Trail06.png', hit: 'Leaf_4.png', muzzle: 'Flare01.png', spin: 2.4, headSize: 0.64, trailLen: 1.5, trailWidth: 0.28 },
+  star: { id: 'styproj.star', vfxRef: 'VFX-STY-STAR', head: 'Star_1.png', trail: 'Trail09.png', hit: 'Flare01.png', muzzle: 'Glow01.png', spin: 8, headSize: 0.68, trailLen: 1.9, trailWidth: 0.3 },
+  elecshadow: { id: 'styproj.electric_shadow', vfxRef: 'VFX-STY-ELECSHADOW', head: 'Lightning01.png', trail: 'Trail08.png', hit: 'Flash01.png', muzzle: 'Flash01.png', spin: 0, headSize: 0.86, trailLen: 2.1, trailWidth: 0.28 },
+  electric: { id: 'styproj.electric', vfxRef: 'VFX-STY-ELECTRIC', head: 'Lightning01.png', trail: 'Trail02.png', hit: 'Flash01.png', muzzle: 'Flash01.png', spin: 0, headSize: 0.9, trailLen: 2.3, trailWidth: 0.26 },
+  shuriken: { id: 'styproj.shuriken', vfxRef: 'VFX-STY-SHURIKEN', head: 'Shape03.png', trail: 'Trail04.png', hit: 'Slash01.png', muzzle: 'Flash01.png', spin: 20, headSize: 0.5, trailLen: 1.4, trailWidth: 0.22 },
+  smoke: { id: 'styproj.smoke', vfxRef: 'VFX-STY-SMOKE', head: 'Smoke_1.png', trail: 'Trail09.png', hit: 'Smoke_3.png', muzzle: 'Smoke_2.png', spin: 0, headSize: 0.92, trailLen: 1.55, trailWidth: 0.4 },
+  arrow: { id: 'styproj.arrow', vfxRef: 'VFX-STY-ARROW', head: 'Arrow01.png', trail: 'Trail04.png', hit: 'Slash01.png', muzzle: 'Flash01.png', spin: 0, headSize: 0.7, trailLen: 1.9, trailWidth: 0.16 }
+});
+
 const BY_SKILL = Object.freeze({
-  staff_arcane_bolt: { id: 'styproj.card', vfxRef: 'VFX-STY-CARD', head: 'Card01.png', trail: 'Trail01.png', hit: 'Glow01.png' },
-  tome_arcane_burst: { id: 'styproj.card', vfxRef: 'VFX-STY-CARD', head: 'Card01.png', trail: 'Trail01.png', hit: 'Glow01.png' },
-  staff_void_bolt: { id: 'styproj.shadow', vfxRef: 'VFX-STY-SHADOW', head: 'Mask01.png', trail: 'Trail08.png', hit: 'Smoke_3.png' },
-  gun_shadow_shot: { id: 'styproj.shadow', vfxRef: 'VFX-STY-SHADOW', head: 'Mask01.png', trail: 'Trail08.png', hit: 'Smoke_3.png' },
-  staff_holy_light: { id: 'styproj.heart', vfxRef: 'VFX-STY-HEART', head: 'Glow01.png', trail: 'Trail07.png', hit: 'Flare01.png' },
-  staff_radiant_heal: { id: 'styproj.heart', vfxRef: 'VFX-STY-HEART', head: 'Glow01.png', trail: 'Trail07.png', hit: 'Flare01.png' },
-  staff_natures_fury: { id: 'styproj.leaf', vfxRef: 'VFX-STY-LEAF', head: 'Leaf_1.png', trail: 'Trail06.png', hit: 'Smoke_3.png' },
-  t0_staff_vine_lash: { id: 'styproj.leaf', vfxRef: 'VFX-STY-LEAF', head: 'Leaf_1.png', trail: 'Trail06.png', hit: 'Smoke_3.png' },
-  staff_frost_bolt: { id: 'styproj.diamond', vfxRef: 'VFX-STY-DIAMOND', head: 'Shape02.png', trail: 'Trail02.png', hit: 'Snowflakes_1.png' },
-  staff_ice_nova: { id: 'styproj.diamond2', vfxRef: 'VFX-STY-DIAMOND2', head: 'Shape02-hollow.png', trail: 'Trail05.png', hit: 'Snow.png' },
-  staff_crusaders_light: { id: 'styproj.angelic', vfxRef: 'VFX-STY-ANGELIC', head: 'Flare01.png', trail: 'Trail09.png', hit: 'Glow01.png' },
-  staff_fire_bolt: { id: 'styproj.laser', vfxRef: 'VFX-STY-LASER', head: 'Thin01.png', trail: 'Trail01.png', hit: 'Flash01.png' },
-  staff_chain_lightning: { id: 'styproj.laser2', vfxRef: 'VFX-STY-LASER2', head: 'Thin02.png', trail: 'Trail02.png', hit: 'Lightning01.png' },
-  staff_storm_call: { id: 'styproj.laser2', vfxRef: 'VFX-STY-LASER2', head: 'Thin02.png', trail: 'Trail02.png', hit: 'Lightning01.png' },
-  dagger_crimson_stab: { id: 'styproj.dagger', vfxRef: 'VFX-STY-DAGGER', head: 'Dagger.png', trail: 'Trail04.png', hit: 'Slash01.png' },
-  dagger_phantom_dash: { id: 'styproj.dagger2', vfxRef: 'VFX-STY-DAGGER2', head: 'Dagger.png', trail: 'Trail08.png', hit: 'Slash02.png' },
-  dagger_shadow_stab: { id: 'styproj.dagger2', vfxRef: 'VFX-STY-DAGGER2', head: 'Dagger.png', trail: 'Trail08.png', hit: 'Slash02.png' },
-  staff_blizzard: { id: 'styproj.frost', vfxRef: 'VFX-STY-FROST', head: 'Snowflakes_1.png', trail: 'Trail05.png', hit: 'Glow01.png' },
-  t0_staff_healing_sprout: { id: 'styproj.flower', vfxRef: 'VFX-STY-FLOWER', head: 'Flower.png', trail: 'Trail06.png', hit: 'Leaf_4.png' },
-  staff_divine_wave: { id: 'styproj.star', vfxRef: 'VFX-STY-STAR', head: 'Star_1.png', trail: 'Trail09.png', hit: 'Flare01.png' },
-  staff_thundergods_judgment: { id: 'styproj.electric', vfxRef: 'VFX-STY-ELECTRIC', head: 'Lightning01.png', trail: 'Trail02.png', hit: 'Flash01.png' },
-  dagger_raging_blades: { id: 'styproj.shuriken', vfxRef: 'VFX-STY-SHURIKEN', head: 'Shape03.png', trail: 'Trail04.png', hit: 'Slash01.png' },
-  t0_wand_practice_bolt: { id: 'styproj.smoke', vfxRef: 'VFX-STY-SMOKE', head: 'Smoke_1.png', trail: 'Trail09.png', hit: 'Smoke_3.png' }
+  staff_arcane_bolt: LOOKS.card,
+  tome_arcane_burst: LOOKS.card,
+  t0_tome_practice_cantrip: LOOKS.card,
+  staff_void_bolt: LOOKS.shadow,
+  gun_shadow_shot: LOOKS.shadow,
+  gun_crimson_blast: LOOKS.shadow,
+  bow_phantom_arrows: LOOKS.shadow,
+  staff_arcane_missile: LOOKS.triangle,
+  t0_wand_arcane_ping: LOOKS.triangle,
+  staff_holy_light: LOOKS.heart,
+  staff_radiant_heal: LOOKS.heart,
+  t0_tome_minor_heal: LOOKS.heart,
+  staff_natures_fury: LOOKS.leaf,
+  t0_staff_vine_lash: LOOKS.leaf,
+  bow_poison_arrow: LOOKS.leaf,
+  staff_frost_bolt: LOOKS.diamond,
+  t0_wand_frost_spark: LOOKS.diamond,
+  staff_ice_nova: LOOKS.diamond2,
+  staff_glacial_shield: LOOKS.diamond2,
+  staff_crusaders_light: LOOKS.angelic,
+  staff_retribution: LOOKS.angelic,
+  staff_fire_bolt: LOOKS.laser,
+  staff_flame_wave: LOOKS.laser,
+  gun_explosive_round: LOOKS.laser,
+  gun_flame_burst: LOOKS.laser,
+  gun_hellfire_barrage: LOOKS.laser,
+  gun_demon_blast: LOOKS.laser,
+  staff_chain_lightning: LOOKS.laser2,
+  staff_storm_call: LOOKS.laser2,
+  gun_grudge_shot: LOOKS.laser2,
+  gun_sniper_round: LOOKS.laser2,
+  gun_cannon_execute: LOOKS.laser2,
+  dagger_crimson_stab: LOOKS.dagger,
+  spear_javelin: LOOKS.dagger,
+  gs_giant_reach: LOOKS.dagger,
+  dagger_phantom_dash: LOOKS.dagger2,
+  dagger_shadow_stab: LOOKS.dagger2,
+  staff_blizzard: LOOKS.frost,
+  staff_absolute_zero: LOOKS.frost,
+  t0_staff_healing_sprout: LOOKS.flower,
+  staff_divine_wave: LOOKS.star,
+  staff_holy_beacon: LOOKS.star,
+  spear_phantom: LOOKS.elecshadow,
+  staff_thundergods_judgment: LOOKS.electric,
+  staff_thunder_cataclysm: LOOKS.electric,
+  dagger_raging_blades: LOOKS.shuriken,
+  t0_wand_practice_bolt: LOOKS.smoke,
+  t0_bow_practice_shot: LOOKS.arrow,
+  t0_bow_pinning_arrow: LOOKS.arrow,
+  t0_bow_rapid_fire: LOOKS.arrow,
+  bow_quick_shot: LOOKS.arrow,
+  bow_multishot: LOOKS.arrow,
+  bow_piercing: LOOKS.arrow
 });
 
 const BY_ELEMENT = Object.freeze({
-  fire: BY_SKILL.staff_fire_bolt,
-  frost: BY_SKILL.staff_frost_bolt,
-  ice: BY_SKILL.staff_frost_bolt,
-  nature: BY_SKILL.staff_natures_fury,
-  holy: BY_SKILL.staff_holy_light,
-  shadow: BY_SKILL.staff_void_bolt,
-  lightning: BY_SKILL.staff_chain_lightning,
-  storm: BY_SKILL.staff_chain_lightning,
-  arcane: BY_SKILL.staff_arcane_bolt,
-  physical: BY_SKILL.dagger_crimson_stab
+  fire: LOOKS.laser,
+  frost: LOOKS.diamond,
+  ice: LOOKS.diamond,
+  nature: LOOKS.leaf,
+  holy: LOOKS.heart,
+  shadow: LOOKS.shadow,
+  lightning: LOOKS.electric,
+  storm: LOOKS.electric,
+  arcane: LOOKS.card,
+  physical: LOOKS.arrow
 });
+
+function fromPatterns(id, element) {
+  const s = String(id || '');
+  if (/bow_|_arrow|quick_shot|multishot|piercing|pinning/.test(s)) return LOOKS.arrow;
+  if (/gun_|sniper|cannon/.test(s)) {
+    if (element === 'fire') return LOOKS.laser;
+    if (element === 'shadow') return LOOKS.shadow;
+    return LOOKS.laser2;
+  }
+  if (/javelin|giant_reach/.test(s)) return LOOKS.dagger;
+  if (/frost|ice|glacial|blizzard|spark/.test(s)) return LOOKS.diamond;
+  if (/holy|radiant|heal|beacon|divine|crusader/.test(s)) return LOOKS.heart;
+  if (/nature|vine|leaf|poison|sprout/.test(s)) return LOOKS.leaf;
+  if (/lightning|thunder|storm/.test(s)) return LOOKS.electric;
+  if (/fire|flame|inferno|meteor|hell/.test(s)) return LOOKS.laser;
+  if (/shadow|void|phantom/.test(s)) return LOOKS.shadow;
+  if (/arcane|wand|cantrip|card/.test(s)) return LOOKS.card;
+  return null;
+}
 
 export function overlayForSkill(skill) {
   if (!skill) return null;
@@ -62,7 +134,7 @@ export function overlayForSkill(skill) {
   const id = skill.id || skill.catalogSkillId;
   if (id && BY_SKILL[id]) return BY_SKILL[id];
   const el = String(skill.element || skill.labElement || skill.damageType || '').toLowerCase();
-  return BY_ELEMENT[el] || BY_ELEMENT.arcane;
+  return fromPatterns(id, el) || BY_ELEMENT[el] || BY_ELEMENT.arcane;
 }
 
 const _loader = new TextureLoader();
@@ -95,19 +167,21 @@ export async function attachOverlayToMesh(mesh, overlay, color) {
     loadStylizedTex(overlay.head)
   ]);
   const bits = {};
+  const tw = overlay.trailWidth || 0.28;
+  const tl = overlay.trailLen || 1.5;
   if (trailMap) {
     const mat = new MeshBasicMaterial({
       map: trailMap,
       color: color ?? 0xffffff,
       transparent: true,
-      opacity: 0.88,
+      opacity: 0.94,
       blending: AdditiveBlending,
       depthWrite: false,
       toneMapped: false
     });
-    const ribbon = new Mesh(new PlaneGeometry(0.28, 1.5), mat);
+    const ribbon = new Mesh(new PlaneGeometry(tw, tl), mat);
     ribbon.rotation.x = Math.PI / 2;
-    ribbon.position.set(0, 0.02, -0.62);
+    ribbon.position.set(0, 0.02, -tl * 0.42);
     ribbon.name = 'sty-trail';
     mesh.add(ribbon);
     bits.trail = ribbon;
@@ -122,8 +196,10 @@ export async function attachOverlayToMesh(mesh, overlay, color) {
       toneMapped: false
     });
     const head = new Sprite(mat);
-    head.scale.set(0.7, 0.7, 1);
+    const hs = overlay.headSize || 0.7;
+    head.scale.set(hs, hs, 1);
     head.name = 'sty-head';
+    head.userData.spin = overlay.spin || 0;
     mesh.add(head);
     bits.head = head;
   }
